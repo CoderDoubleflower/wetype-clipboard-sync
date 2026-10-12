@@ -1,5 +1,7 @@
 # wetype-clipboard-sync-linux
 
+[![CI](https://github.com/YuleBest/wetype-clipboard-sync-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/YuleBest/wetype-clipboard-sync-linux/actions/workflows/ci.yml)
+
 在 Linux 上使用微信输入法（WeType）的跨设备剪贴板：手机复制，Linux 直接粘贴；
 Linux 复制，手机也能收到。
 
