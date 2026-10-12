@@ -1,0 +1,29 @@
+[package]
+name = "wxclipd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "Apache-2.0"
+description = "Linux clipboard sync daemon for WeType cross-device clipboard"
+publish = false
+
+[[bin]]
+name = "wxclipd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "signal",
+    "process",
+    "io-util",
+] }
+wx-ime-sdk = { path = "../vendor/wx-ime-sdk/crates/wx-ime-sdk" }
+
+[profile.release]
+lto = "thin"
+strip = true

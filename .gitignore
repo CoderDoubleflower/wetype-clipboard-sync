@@ -1,0 +1,10 @@
+# 构建产物
+target/
+
+# APK、反编译产物、样本与中间文件：版权与体积原因不分发
+reverse/*
+!reverse/README.md
+
+# 其它
+*.log
+.DS_Store
