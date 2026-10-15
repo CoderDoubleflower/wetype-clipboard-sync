@@ -101,6 +101,8 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
   只在收到 `KEY_LEFTCTRL`/`KEY_RIGHTCTRL`/`BTN_RIGHT` 的"按下"事件时通知主循环去拉取；
   其它按键只看类型不看内容，不做任何记录。
 - 防抖：所有设备共享一个时间戳，默认 800 ms（`--paste-trigger-debounce-ms`）。
+- 防覆盖：触发会让拉取更频繁，因此 `poll_remote` 在发布/应用前都会再读一次本机剪贴板，
+  只要发现未发布的新内容就先把它发出去并跳过本轮应用，避免用远端旧内容覆盖刚复制的东西。
 - 权限：`packaging/60-wxclipd-input.rules` 必须在 systemd 自带规则（`73-seat-late.rules`）
   **之前**执行，否则 `uaccess` 内建拿不到标签。改完要
   `sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input`。

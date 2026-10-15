@@ -240,8 +240,25 @@ async fn poll_remote(
     last_known: &mut Option<String>,
     failures: u32,
 ) -> u32 {
+    // 本机剪贴板有未发布的新内容（例如刚按下 Ctrl+C）时，先把本地内容发出去并跳过本轮应用，
+    // 否则可能用远端旧内容覆盖用户刚复制的东西。
+    if let Ok(Some(text)) = clipboard::read_text(backend).await {
+        if Some(&text) != last_known.as_ref() {
+            *last_known = Some(text.clone());
+            send(client, &text).await;
+            return 0;
+        }
+    }
     match client.poll_clipboard_once().await {
         Ok(Some(received)) => {
+            // 拉取期间用户可能刚复制了新内容：应用前再确认一次，避免覆盖。
+            if let Ok(Some(current)) = clipboard::read_text(backend).await {
+                if Some(&current) != last_known.as_ref() {
+                    *last_known = Some(current.clone());
+                    send(client, &current).await;
+                    return 0;
+                }
+            }
             match received.content {
                 ClipboardContent::Text(text) => {
                     if let Err(error) = clipboard::write_text(backend, &text).await {
