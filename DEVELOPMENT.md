@@ -68,7 +68,7 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
 ## 轮询与带宽
 
 - 本地剪贴板默认 400 ms 检查一次（`--interval`），只在内容变化时才发网络请求。
-- 远端轮询自适应：在场（`loginctl` 的 `IdleHint`/`LockedHint` 都是 no）每 5 秒
+- 远端轮询自适应：在场（`loginctl` 的 `IdleHint`/`LockedHint` 都是 no）每 3 秒
   （`--active-poll-interval`），离开或锁屏 60 秒（`--poll-interval`）。请求携带本地已有版本号，
   服务端会省略未变化的剪贴板内容，实测单次响应约 156 字节；
   不携带版本号时响应会包含整段剪贴板文本。

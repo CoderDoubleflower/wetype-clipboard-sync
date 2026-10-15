@@ -33,7 +33,7 @@ wxclipd - Linux 端微信输入法跨设备剪贴板
   --yes             配对时自动确认对方，不询问
   --interval MS     本地剪贴板轮询间隔，默认 400
   --poll-interval S 离开/锁屏时的远端轮询秒数，默认 60
-  --active-poll-interval S  人在电脑前时的远端轮询秒数，默认 5
+  --active-poll-interval S  人在电脑前时的远端轮询秒数，默认 3
   --send-current    启动时把当前剪贴板内容发送一次
   -h, --help        显示帮助
 ";
@@ -498,7 +498,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut peer = None;
     let mut interval = Duration::from_millis(400);
     let mut poll_interval = Duration::from_secs(60);
-    let mut active_poll_interval = Duration::from_secs(5);
+    let mut active_poll_interval = Duration::from_secs(3);
     let mut send_current = false;
     let mut command: Option<&str> = None;
     let mut positional: Vec<String> = Vec::new();
