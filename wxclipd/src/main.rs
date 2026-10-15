@@ -80,8 +80,31 @@ async fn dispatch(args: Args) -> Result<()> {
             return unbind_via_control(&args.state, &reply, *peer, *yes).await;
         }
     }
+    if matches!(args.command, Command::Status) {
+        if let Some(reply) = control_call(&args.state, "status").await? {
+            return print_status(&reply);
+        }
+    }
+    if let Command::Pair { code } = &args.command {
+        if sync::control_socket_path(&args.state).exists() {
+            println!("已提交配对码，等待另一台设备确认。");
+            if let Some(reply) = control_call(&args.state, &format!("pair {code}")).await? {
+                return print_paired(&reply);
+            }
+        }
+    }
     let name = resolve_name(&args.state, args.name)?;
-    let client = Client::open(ClientOptions::new(&args.state, name)).await?;
+    let client = match Client::open(ClientOptions::new(&args.state, name)).await {
+        Ok(client) => client,
+        Err(error) if error.to_string().contains("already in use") => {
+            bail!(
+                "wxclipd 服务正在运行并持有身份：{error}\n\
+                 提示：先 `systemctl --user stop wxclipd`，执行完再 `systemctl --user start wxclipd`。\n\
+                 `devices` / `unbind` / `sync-now` / `status` / `pair` 支持在服务运行时直接使用。"
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
     let result = match args.command {
         Command::Code { yes } => code(&client, yes).await,
         Command::Pair { code } => pair(&client, code).await,
@@ -324,16 +347,60 @@ fn print_devices(reply: &str) -> Result<()> {
 
 async fn status(client: &Client) -> Result<()> {
     let local = client.local_device().await?;
-    println!("本机: {} (Uin {})", local.name, local.uin);
     let info = client.inspect_clipboard().await?;
+    print_status(
+        &serde_json::json!({
+            "local": { "uin": local.uin, "name": local.name },
+            "paired": true,
+            "clipboard": {
+                "has_message": info.has_message,
+                "version": info.version,
+                "kind": info.kind,
+                "from_uin": info.from_uin,
+                "already_consumed": info.already_consumed,
+                "expired": info.expired,
+            },
+        })
+        .to_string(),
+    )
+}
+
+fn print_status(reply: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(reply.trim()).context("解析状态失败")?;
+    println!(
+        "本机: {} (Uin {})",
+        value["local"]["name"].as_str().unwrap_or("?"),
+        value["local"]["uin"].as_u64().unwrap_or(0)
+    );
+    if !value["paired"].as_bool().unwrap_or(false) {
+        println!("尚未配对，运行 `wxclipd pair CODE` 或 `wxclipd code`。");
+        return Ok(());
+    }
+    let clipboard = &value["clipboard"];
     println!(
         "服务端剪贴板: 消息={} 版本={} 类型={} 来源Uin={} 已消费={} 过期={}",
-        info.has_message,
-        info.version,
-        info.kind,
-        info.from_uin,
-        info.already_consumed,
-        info.expired
+        clipboard["has_message"].as_bool().unwrap_or(false),
+        clipboard["version"].as_u64().unwrap_or(0),
+        clipboard["kind"].as_u64().unwrap_or(0),
+        clipboard["from_uin"].as_u64().unwrap_or(0),
+        clipboard["already_consumed"].as_bool().unwrap_or(false),
+        clipboard["expired"].as_bool().unwrap_or(false)
+    );
+    Ok(())
+}
+
+fn print_paired(reply: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(reply.trim()).context("解析配对结果失败")?;
+    let peer = &value["peer"];
+    let uin = peer["uin"].as_u64().unwrap_or(0);
+    println!(
+        "已配对: {}{}",
+        peer["name"].as_str().unwrap_or("?"),
+        if uin > 0 {
+            format!(" (Uin {uin})")
+        } else {
+            String::new()
+        }
     );
     Ok(())
 }

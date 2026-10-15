@@ -14,7 +14,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
 use tokio::time::{interval, MissedTickBehavior};
-use wx_ime_sdk::{Client, ClipboardContent};
+use wx_ime_sdk::{Client, ClipboardContent, PairingCode};
 
 pub struct SyncOptions {
     /// 本地剪贴板轮询间隔。
@@ -190,6 +190,7 @@ fn spawn_control(path: &Path, notify: Arc<Notify>, client: Client) -> Result<()>
                         "ok\n".to_string()
                     }
                     "devices" => control_devices(&client).await,
+                    "status" => control_status(&client).await,
                     other => match other.strip_prefix("unbind ") {
                         Some(value) => match value.trim().parse::<u64>() {
                             Ok(uin) => match client.unbind(uin).await {
@@ -198,7 +199,10 @@ fn spawn_control(path: &Path, notify: Arc<Notify>, client: Client) -> Result<()>
                             },
                             Err(_) => "err --peer 需要是数字 Uin\n".to_string(),
                         },
-                        None => "err 未知命令\n".to_string(),
+                        None => match other.strip_prefix("pair ") {
+                            Some(code) => control_pair(&client, code.trim()).await,
+                            None => "err 未知命令\n".to_string(),
+                        },
                     },
                 };
                 let _ = stream.write_all(reply.as_bytes()).await;
@@ -231,6 +235,57 @@ async fn control_devices(client: &Client) -> String {
         "devices": peers,
     });
     format!("{payload}\n")
+}
+
+async fn control_status(client: &Client) -> String {
+    let local = match client.local_device().await {
+        Ok(local) => local,
+        Err(error) => return format!("err 查询本机失败: {error}\n"),
+    };
+    let info = match client.inspect_clipboard().await {
+        Ok(info) => info,
+        Err(_) => {
+            let payload = serde_json::json!({
+                "local": { "uin": local.uin, "name": local.name },
+                "paired": false,
+            });
+            return format!("{payload}\n");
+        }
+    };
+    let payload = serde_json::json!({
+        "local": { "uin": local.uin, "name": local.name },
+        "paired": true,
+        "clipboard": {
+            "has_message": info.has_message,
+            "version": info.version,
+            "kind": info.kind,
+            "from_uin": info.from_uin,
+            "already_consumed": info.already_consumed,
+            "expired": info.expired,
+        },
+    });
+    format!("{payload}\n")
+}
+
+/// 让常驻进程替 CLI 加入配对码：六位码由官方输入法显示，对方确认后返回结果。
+async fn control_pair(client: &Client, code: &str) -> String {
+    let code = match PairingCode::parse(code.to_string()) {
+        Ok(code) => code,
+        Err(_) => return "err 配对码必须是六位数字\n".to_string(),
+    };
+    let mut session = match client.join(code).await {
+        Ok(session) => session,
+        Err(error) => return format!("err 提交配对码失败: {error}\n"),
+    };
+    match session.wait().await {
+        Ok((_, peer)) => {
+            let payload = serde_json::json!({
+                "peer": { "uin": peer.uin.unwrap_or(0), "name": peer.name },
+            });
+            format!("{payload}\n")
+        }
+        Err(error) => format!("err 配对失败: {error}\n"),
+    }
 }
 
 async fn is_paired(client: &Client) -> bool {

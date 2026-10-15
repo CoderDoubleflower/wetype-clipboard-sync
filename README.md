@@ -71,8 +71,9 @@ systemctl --user disable --now wxclipd   # 停用并取消自启
 
 - 目前只同步文本；图片与文件互传的协议已还原在 `docs/`，但未实现。
 - 身份、私钥和消费游标保存在 `~/.local/state/wxclipd`，属于敏感数据，请勿外传。
-- 同一个状态目录只允许一个进程；`devices`、`unbind`、`sync-now` 会通过控制套接字
-  交给常驻进程执行，不需要先停服务。直接读写身份的 `status`、`code`、`pair` 仍需停服务。
+- 同一个状态目录只允许一个进程；`devices`、`status`、`pair`、`unbind`、`sync-now`
+  会通过控制套接字交给常驻进程执行，不需要先停服务。只有 `code`（要一边显示配对码
+  一边等交互确认）需要先 `systemctl --user stop wxclipd`。
 - 非官方项目，与腾讯无关联，协议可能随官方更新失效。
 
 ## 目录

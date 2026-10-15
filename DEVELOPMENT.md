@@ -57,10 +57,13 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
 | --- | --- |
 | `sync` | 立即检查本地剪贴板并轮询一次远端 |
 | `devices` | 返回本机与已绑定设备的 JSON |
+| `status` | 返回本机与组内剪贴板状态的 JSON |
+| `pair <code>` | 以加入方身份提交配对码，等对方确认后返回结果 |
 | `unbind <uin>` | 解绑指定设备（命令 35） |
 
-因此 `wxclipd devices` / `unbind` / `sync-now` 在常驻服务运行时也能用，不需要先停服务；
-这些子命令优先走套接字，连不上才自己打开身份文件。
+因此 `wxclipd devices` / `status` / `pair` / `unbind` / `sync-now` 在常驻服务运行时也能用，
+不需要先停服务；这些子命令优先走套接字，连不上才自己打开身份文件。
+`code` 需要边显示配对码边等用户确认，仍在本地执行，要先停服务。
 
 ## 轮询与带宽
 
