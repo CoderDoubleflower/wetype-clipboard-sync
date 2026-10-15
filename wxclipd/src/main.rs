@@ -33,8 +33,7 @@ wxclipd - Linux 端微信输入法跨设备剪贴板
   --peer UIN        unbind 要解绑的设备 Uin（只有一台时可省略）
   --yes             配对时自动确认对方，不询问
   --interval MS     本地剪贴板轮询间隔，默认 400
-  --poll-interval S 离开/锁屏时的远端轮询秒数，默认 60
-  --active-poll-interval S  人在电脑前时的远端轮询秒数，默认 3
+  --poll-interval S 远端轮询兜底秒数，默认 90
   --no-paste-trigger        关闭「Ctrl/右键触发即时拉取」（默认开启）
   --paste-trigger-debounce-ms MS  粘贴触发防抖毫秒数，默认 800
   --send-current    启动时把当前剪贴板内容发送一次
@@ -58,7 +57,6 @@ enum Command {
         interval: Duration,
         send_current: bool,
         poll_interval: Duration,
-        active_poll_interval: Duration,
         paste_trigger: bool,
         paste_debounce: Duration,
     },
@@ -123,7 +121,6 @@ async fn dispatch(args: Args) -> Result<()> {
             interval,
             send_current,
             poll_interval,
-            active_poll_interval,
             paste_trigger,
             paste_debounce,
         } => {
@@ -139,7 +136,6 @@ async fn dispatch(args: Args) -> Result<()> {
                 sync::SyncOptions {
                     local_interval: interval,
                     poll_interval,
-                    active_poll_interval,
                     paste_trigger,
                     paste_debounce,
                     send_current,
@@ -506,8 +502,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut yes = false;
     let mut peer = None;
     let mut interval = Duration::from_millis(400);
-    let mut poll_interval = Duration::from_secs(60);
-    let mut active_poll_interval = Duration::from_secs(3);
+    let mut poll_interval = Duration::from_secs(90);
     let mut paste_trigger = true;
     let mut paste_debounce = Duration::from_millis(800);
     let mut send_current = false;
@@ -545,14 +540,6 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
                     value
                         .parse()
                         .with_context(|| format!("--poll-interval 需要秒数，得到 {value}"))?,
-                );
-            }
-            "--active-poll-interval" => {
-                let value = value_for("--active-poll-interval")?;
-                active_poll_interval = Duration::from_secs(
-                    value
-                        .parse()
-                        .with_context(|| format!("--active-poll-interval 需要秒数，得到 {value}"))?,
                 );
             }
             "--no-paste-trigger" => paste_trigger = false,
@@ -607,7 +594,6 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
             interval,
             send_current,
             poll_interval,
-            active_poll_interval,
             paste_trigger,
             paste_debounce,
         },
