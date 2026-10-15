@@ -19,8 +19,10 @@ use wx_ime_sdk::{Client, ClipboardContent, NotifyEvent, PairingCode};
 pub struct SyncOptions {
     /// 本地剪贴板轮询间隔。
     pub local_interval: Duration,
-    /// 远端（服务端）轮询间隔。
+    /// 离开/锁屏时的远端轮询间隔。
     pub poll_interval: Duration,
+    /// 人在电脑前时的远端轮询间隔（手机复制后要尽快到本机）。
+    pub active_poll_interval: Duration,
     pub send_current: bool,
 }
 
@@ -59,8 +61,18 @@ pub async fn run(
 
     let mut local_tick = interval(options.local_interval);
     local_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut poll_tick = interval(options.poll_interval);
-    poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut present = user_present().await;
+    println!(
+        "[wxclipd] 远端轮询：在场 {} 秒 / 离开 {} 秒",
+        options.active_poll_interval.as_secs(),
+        options.poll_interval.as_secs()
+    );
+    let mut next_poll = tokio::time::Instant::now()
+        + if present {
+            options.active_poll_interval
+        } else {
+            options.poll_interval
+        };
 
     let mut failures: u32 = 0;
 
@@ -82,7 +94,20 @@ pub async fn run(
                     Err(error) => eprintln!("[wxclipd] 读取剪贴板失败: {error:#}"),
                 }
             }
-            _ = poll_tick.tick() => {
+            _ = tokio::time::sleep_until(next_poll) => {
+                let now_present = user_present().await;
+                if now_present != present {
+                    present = now_present;
+                    println!(
+                        "[wxclipd] 用户{}，远端轮询切到 {} 秒",
+                        if present { "回来" } else { "离开/锁屏" },
+                        if present {
+                            options.active_poll_interval.as_secs()
+                        } else {
+                            options.poll_interval.as_secs()
+                        }
+                    );
+                }
                 if !paired && paired_checked_at.elapsed() >= Duration::from_secs(30) {
                     paired_checked_at = Instant::now();
                     paired = is_paired(&client).await;
@@ -91,6 +116,12 @@ pub async fn run(
                     }
                 }
                 failures = poll_remote(&client, backend, &mut last_known, failures).await;
+                next_poll = tokio::time::Instant::now()
+                    + if present {
+                        options.active_poll_interval
+                    } else {
+                        options.poll_interval
+                    };
             }
             _ = notify.notified() => {
                 println!("[wxclipd] 手动触发同步");
@@ -118,6 +149,27 @@ pub async fn run(
     }
     let _ = std::fs::remove_file(&control);
     Ok(())
+}
+
+/// 通过 logind 判断用户是否在电脑前（未空闲、未锁屏）。
+/// 拿不到会话信息时按“在场”处理：优先保证延迟，用户可用 --active-poll-interval 调整。
+async fn user_present() -> bool {
+    let Ok(session) = std::env::var("XDG_SESSION_ID") else {
+        return true;
+    };
+    let output = tokio::process::Command::new("loginctl")
+        .args(["show-session", &session, "-p", "IdleHint", "-p", "LockedHint"])
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let idle = text.lines().any(|line| line.trim() == "IdleHint=yes");
+            let locked = text.lines().any(|line| line.trim() == "LockedHint=yes");
+            !idle && !locked
+        }
+        _ => true,
+    }
 }
 
 /// 维护推送长连接：断开后指数退避重连；事件只当作“有新数据”的唤醒信号。

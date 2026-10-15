@@ -68,9 +68,11 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
 ## 轮询与带宽
 
 - 本地剪贴板默认 400 ms 检查一次（`--interval`），只在内容变化时才发网络请求。
-- 远端默认 60 秒轮询一次（`--poll-interval`）。请求携带本地已有版本号，
+- 远端轮询自适应：在场（`loginctl` 的 `IdleHint`/`LockedHint` 都是 no）每 5 秒
+  （`--active-poll-interval`），离开或锁屏 60 秒（`--poll-interval`）。请求携带本地已有版本号，
   服务端会省略未变化的剪贴板内容，实测单次响应约 156 字节；
   不携带版本号时响应会包含整段剪贴板文本。
+- 拿到会话状态需要 `XDG_SESSION_ID` 与 `loginctl`；取不到时按“在场”处理（优先延迟）。
 - `cargo run --example probe_group -- ~/.local/state/wxclipd [测试文本]` 可复现这个对比。
   它会在状态目录下写 `capture-*`（含明文响应），用完自行删除。
 - 推送长连接实现见 `vendor/wx-ime-sdk/crates/wx-ime-sdk/src/notify.rs`；

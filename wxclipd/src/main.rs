@@ -32,7 +32,8 @@ wxclipd - Linux 端微信输入法跨设备剪贴板
   --peer UIN        unbind 要解绑的设备 Uin（只有一台时可省略）
   --yes             配对时自动确认对方，不询问
   --interval MS     本地剪贴板轮询间隔，默认 400
-  --poll-interval S 远端轮询间隔秒数，默认 60
+  --poll-interval S 离开/锁屏时的远端轮询秒数，默认 60
+  --active-poll-interval S  人在电脑前时的远端轮询秒数，默认 5
   --send-current    启动时把当前剪贴板内容发送一次
   -h, --help        显示帮助
 ";
@@ -54,6 +55,7 @@ enum Command {
         interval: Duration,
         send_current: bool,
         poll_interval: Duration,
+        active_poll_interval: Duration,
     },
 }
 
@@ -116,13 +118,13 @@ async fn dispatch(args: Args) -> Result<()> {
             interval,
             send_current,
             poll_interval,
+            active_poll_interval,
         } => {
             let backend = clipboard::Backend::detect()?;
             println!(
-                "[wxclipd] 剪贴板后端: {}，设备: {}，远端轮询: {} 秒",
+                "[wxclipd] 剪贴板后端: {}，设备: {}",
                 backend.describe(),
-                client.local_device().await?.name,
-                poll_interval.as_secs()
+                client.local_device().await?.name
             );
             sync::run(
                 client.clone(),
@@ -130,6 +132,7 @@ async fn dispatch(args: Args) -> Result<()> {
                 sync::SyncOptions {
                     local_interval: interval,
                     poll_interval,
+                    active_poll_interval,
                     send_current,
                 },
                 sync::control_socket_path(&args.state),
@@ -495,6 +498,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut peer = None;
     let mut interval = Duration::from_millis(400);
     let mut poll_interval = Duration::from_secs(60);
+    let mut active_poll_interval = Duration::from_secs(5);
     let mut send_current = false;
     let mut command: Option<&str> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -530,6 +534,14 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
                     value
                         .parse()
                         .with_context(|| format!("--poll-interval 需要秒数，得到 {value}"))?,
+                );
+            }
+            "--active-poll-interval" => {
+                let value = value_for("--active-poll-interval")?;
+                active_poll_interval = Duration::from_secs(
+                    value
+                        .parse()
+                        .with_context(|| format!("--active-poll-interval 需要秒数，得到 {value}"))?,
                 );
             }
             "--yes" => yes = true,
@@ -574,6 +586,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
             interval,
             send_current,
             poll_interval,
+            active_poll_interval,
         },
         Some(other) => bail!("未知命令 {other}"),
         None => bail!("缺少命令，用 --help 查看用法"),
