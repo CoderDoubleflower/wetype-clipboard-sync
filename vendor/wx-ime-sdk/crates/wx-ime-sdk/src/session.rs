@@ -107,17 +107,28 @@ impl Session {
             .as_mut()
             .map(|capture| capture.request(&packet))
             .transpose()?;
-        let mut request = self
-            .http
-            .post(format!("{}{}", transport::HOST, endpoint.path()));
-        for (name, value) in packet.headers {
-            request = request.header(name, value);
-        }
-        let mut response = request
-            .body(packet.body)
-            .send()
-            .await
-            .map_err(|_| Error::Transport)?;
+        // 复用连接可能已被服务端关闭（轮询间隔较长时很常见）：失败后重建一次请求。
+        let url = format!("{}{}", transport::HOST, endpoint.path());
+        let mut attempt = 0;
+        let mut response = loop {
+            let mut request = self.http.post(&url);
+            for (name, value) in &packet.headers {
+                request = request.header(name, value);
+            }
+            match request.body(packet.body.clone()).send().await {
+                Ok(response) => break response,
+                Err(error) => {
+                    if attempt >= 1 {
+                        let _ = error;
+                        return Err(Error::Transport);
+                    }
+                    if std::env::var("WXDEBUG_TRANSPORT").is_ok() {
+                        eprintln!("[debug] transport retry after: {error}");
+                    }
+                    attempt += 1;
+                }
+            }
+        };
         let status = response.status();
         let compression = response
             .headers()
