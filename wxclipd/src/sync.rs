@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::{interval, MissedTickBehavior};
-use wx_ime_sdk::{Client, ClipboardContent, PairingCode};
+use wx_ime_sdk::{Client, ClipboardContent, NotifyEvent, PairingCode};
 
 pub struct SyncOptions {
     /// 本地剪贴板轮询间隔。
@@ -63,6 +63,11 @@ pub async fn run(
     poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut failures: u32 = 0;
+
+    // 推送长连接：任何一帧到达都立刻拉一次剪贴板；连不上就纯轮询。
+    let (push_tx, mut push_rx) = mpsc::channel::<u32>(8);
+    tokio::spawn(notify_loop(client.clone(), push_tx));
+
     loop {
         tokio::select! {
             _ = local_tick.tick() => {
@@ -101,6 +106,10 @@ pub async fn run(
                 println!("[wxclipd] 收到 SIGUSR1，立即同步");
                 failures = poll_remote(&client, backend, &mut last_known, failures).await;
             }
+            Some(event_type) = push_rx.recv() => {
+                println!("[wxclipd] 服务端推送 event_type={event_type}，立即拉取剪贴板");
+                failures = poll_remote(&client, backend, &mut last_known, failures).await;
+            }
             _ = tokio::signal::ctrl_c() => {
                 println!("[wxclipd] 退出");
                 break;
@@ -109,6 +118,42 @@ pub async fn run(
     }
     let _ = std::fs::remove_file(&control);
     Ok(())
+}
+
+/// 维护推送长连接：断开后指数退避重连；事件只当作“有新数据”的唤醒信号。
+async fn notify_loop(client: Client, events: mpsc::Sender<u32>) {
+    let mut backoff = Duration::from_secs(5);
+    loop {
+        match client.open_notify_channel().await {
+            Ok(mut channel) => {
+                println!("[wxclipd] 推送通道已连接");
+                backoff = Duration::from_secs(5);
+                loop {
+                    match channel.next_event().await {
+                        Ok(NotifyEvent::Push { event_type, .. }) => {
+                            if events.send(event_type).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(NotifyEvent::Idle) => {}
+                        Ok(NotifyEvent::Closed) => {
+                            println!("[wxclipd] 推送通道关闭，准备重连");
+                            break;
+                        }
+                        Err(error) => {
+                            eprintln!("[wxclipd] 推送通道错误: {error:#}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("[wxclipd] 推送通道连接失败: {error:#}");
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(120));
+    }
 }
 
 async fn poll_remote(

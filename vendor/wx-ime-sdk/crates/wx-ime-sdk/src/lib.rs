@@ -5,6 +5,7 @@ mod capture;
 mod client;
 mod device;
 mod error;
+mod notify;
 mod pairing;
 mod session;
 mod storage;
@@ -24,4 +25,5 @@ pub use file::{
     FileTransferProgress, ReceivedFile,
 };
 pub use pairing::{PairingPeer, PairingSession, PairingUpdate};
+pub use notify::{NotifyChannel, NotifyEvent};
 pub use wx_ime_protocol::pairing::PairingCode;

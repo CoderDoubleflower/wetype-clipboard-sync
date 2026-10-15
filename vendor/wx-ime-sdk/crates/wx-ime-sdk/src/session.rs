@@ -60,6 +60,22 @@ impl Session {
             self.store.state.device_name
         )
     }
+    pub(crate) fn uin(&self) -> u64 {
+        self.store.state.uin
+    }
+    pub(crate) fn control_key(&self) -> Result<ControlKey> {
+        self.key
+            .clone()
+            .ok_or(Error::Invalid("session not initialized"))
+    }
+    pub(crate) fn next_task(&mut self) -> Result<u32> {
+        let task = self.task;
+        self.task = self
+            .task
+            .checked_add(1)
+            .ok_or(Error::Invalid("session task counter exhausted"))?;
+        Ok(task)
+    }
     pub fn timestamp(&self) -> Result<i64> {
         now()?
             .checked_add(self.offset)

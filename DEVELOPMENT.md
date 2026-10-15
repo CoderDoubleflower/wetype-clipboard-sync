@@ -73,6 +73,9 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
   不携带版本号时响应会包含整段剪贴板文本。
 - `cargo run --example probe_group -- ~/.local/state/wxclipd [测试文本]` 可复现这个对比。
   它会在状态目录下写 `capture-*`（含明文响应），用完自行删除。
+- 推送长连接实现见 `vendor/wx-ime-sdk/crates/wx-ime-sdk/src/notify.rs`；
+  `cargo run -p wx-ime-sdk --example notify_probe -- <状态目录> <设备名> 60` 可单独观察事件。
+  任何推送都会让守护进程立刻拉取一次剪贴板，轮询只是兜底。
 
 ## 发布
 

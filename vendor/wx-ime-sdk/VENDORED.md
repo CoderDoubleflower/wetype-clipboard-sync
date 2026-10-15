@@ -15,6 +15,12 @@
     so the server stops re-sending unchanged clipboard payloads.
   - `crates/wx-ime-sdk/src/client.rs`: public `group_with_clipboard_version()` and
     `unbind()`.
+  - `crates/wx-ime-protocol/proto/websocket.proto` + `build.rs` + `lib.rs`: push-channel
+    frames (`WebSocketPbRequest/Response`, `HttpRequest/Response`, `WebSocketPushInfo`),
+    field numbers from Ghidra on the 4.0.0 native library.
+  - `crates/wx-ime-sdk/src/notify.rs`: WebSocket push channel — connect with the
+    `wxws_pb` subprotocol, redo ECDH on the socket, subscribe with cmd 8074 and decode
+    pushed events. `Cargo.toml` gains `tokio-tungstenite` + `futures-util`.
 
 This tree is the protocol layer (`crates/wx-ime-protocol`) and async client
 (`crates/wx-ime-sdk`) for the WeType (微信输入法) cross-device clipboard. The

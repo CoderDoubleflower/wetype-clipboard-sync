@@ -1,0 +1,50 @@
+syntax = "proto3";
+package websocket;
+
+// 推送长连接帧格式。字段号来自 Android 4.0.0 libime_net.so 的
+// WebSocketPb{Request,Response}/Http{Request,Response}/WebSocketPushInfo
+// 序列化函数反编译（Ghidra，2026-10-16）。
+
+message HttpHeader {
+  string key = 1;
+  string value = 2;
+}
+
+message HttpRequest {
+  string method = 1;
+  string field2 = 2;
+  string field3 = 3;
+  string query = 4;
+  repeated HttpHeader headers = 5;
+  bytes body = 6;
+}
+
+message HttpResponse {
+  int32 field1 = 1;
+  int32 status = 2;
+  string field3 = 3;
+  repeated HttpHeader headers = 4;
+  bytes body = 5;
+}
+
+message WebSocketPbRequest {
+  uint32 field1 = 1;
+  uint32 field2 = 2;
+  uint32 field3 = 3;
+  uint32 field4 = 4;
+  HttpRequest http = 5;
+}
+
+message WebSocketPbResponse {
+  uint32 field1 = 1;
+  uint32 field2 = 2;
+  bytes field3 = 3;
+  HttpResponse http = 4;
+}
+
+message WebSocketPushInfo {
+  uint32 field1 = 1;
+  uint64 field2 = 2;
+  uint32 field3 = 3;
+  bytes field4 = 4;
+}

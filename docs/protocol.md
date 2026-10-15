@@ -109,11 +109,41 @@ message SendClipboardResponse { int32 status = 1; uint64 version = 2; }
 接收条件：`version > 本组已消费版本`、`from_uin` 不是自己、`expire_at*1000 > 当前时间`。
 消费后需要持久化游标，避免重启后重复投递。
 
-## 推送
+## 推送（WebSocket 长连接，已实现）
 
-长连接（`libwcwss.so`，websocketpp + TLS）承载服务端推送：
+官方推送走 `wss://wetype.weixin.qq.com/`，子协议固定为 **`wxws_pb`**
+（`libwcwss.so`/`libime_net.so` + Ghidra 反编译确认，2026-10-16 实测可用）。
 
-- `Push.PushClipboardMsg{group_id=1, msg=2}`：组内出现新剪贴板消息。
-- `Push.PushBindSuccess{bind_id, group_id, operate}` / `PushUnBind` / `PushOnBoundListChange`：绑定状态变化。
+### 握手与订阅
 
-`推测`：推送只是“有新数据”的通知，正文仍以 4814/34 拉取为准；本实现用 2 秒轮询代替长连接。
+1. 建立 WebSocket，`Sec-WebSocket-Protocol: wxws_pb`。服务端不校验路径，任意 path 都返回 101。
+2. **在连接上重做一次 ECDH**：把 `/oauth_pubkey_v2` 的请求体（用 bootstrap 密钥 AES-256-ECB
+   加密）作为一帧发出，拿到本连接专属的服务端公钥，用身份私钥派生出连接会话密钥
+   （与 HTTP 会话密钥不同，实测两者后缀不一样）。
+3. 发一条 `Kb-CmdId=8074`、`Kb-SubCmdId=0` 的订阅请求（官方 `OpenNotifyChannel` 用的 0x1f8a）。
+
+### 帧格式
+
+外层 `websocket.WebSocketPbRequest` 的字段 1–4 填 0，字段 5 是内层 `HttpRequest`：
+`method="POST"`、字段 3 = 路径（`/api_v2`）、字段 5 = `Kb-*` 头（另有
+`HOST: wetype.weixin.qq.com`）、字段 6 = 加密正文。字段号来自 Ghidra 反编译的
+`_InternalSerialize` 函数。
+
+### 推送消息
+
+服务端推来 `WebSocketPbResponse{field3="notify", http.status=0, http.body=<密文>}`；
+用连接会话密钥 AES-256-ECB 解密后是：
+
+```proto
+message PushEnvelope {
+  uint32 event_type = 1;
+  uint64 timestamp_ms = 2;
+  uint32 field3 = 3;
+  bytes payload = 4;
+}
+```
+
+事件类型（反编译 Java `C2102q.onReceiveNotify`）：`1/3` 绑定确认与取消，`2/5/6/8/9/10` 设备组，
+`4/7` 剪贴板，`11` 文件传输邀请，`13/14` 语音。实测解绑事件（6）能收到、能解出
+`PushUnBind{group_id}`；剪贴板事件（4/7）在测试环境没有触发推送，因此本实现把任何推送
+都当成“有新数据”的唤醒信号，同时保留定时轮询兜底。

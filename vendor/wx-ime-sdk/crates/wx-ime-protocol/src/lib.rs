@@ -16,6 +16,11 @@ pub mod flurry {
     include!(concat!(env!("OUT_DIR"), "/flurry.rs"));
 }
 
+/// Push-channel frames: WebSocketPbRequest/Response and WebSocketPushInfo.
+pub mod websocket {
+    include!(concat!(env!("OUT_DIR"), "/websocket.rs"));
+}
+
 /// Canonical protobuf descriptors, including the native file-transfer service.
 /// Build-time consumers can generate service bindings without a sibling checkout.
 pub const FILE_DESCRIPTOR_SET: &[u8] =

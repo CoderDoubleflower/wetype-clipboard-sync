@@ -30,6 +30,8 @@ zeroize.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [build-dependencies]
 tonic-prost-build = "0.14"
