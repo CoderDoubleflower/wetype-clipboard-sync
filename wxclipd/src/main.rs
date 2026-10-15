@@ -2,6 +2,7 @@
 //! clipboard group.
 
 mod clipboard;
+mod input_watch;
 mod sync;
 
 use anyhow::{bail, Context, Result};
@@ -34,6 +35,8 @@ wxclipd - Linux 端微信输入法跨设备剪贴板
   --interval MS     本地剪贴板轮询间隔，默认 400
   --poll-interval S 离开/锁屏时的远端轮询秒数，默认 60
   --active-poll-interval S  人在电脑前时的远端轮询秒数，默认 3
+  --no-paste-trigger        关闭「Ctrl/右键触发即时拉取」（默认开启）
+  --paste-trigger-debounce-ms MS  粘贴触发防抖毫秒数，默认 800
   --send-current    启动时把当前剪贴板内容发送一次
   -h, --help        显示帮助
 ";
@@ -56,6 +59,8 @@ enum Command {
         send_current: bool,
         poll_interval: Duration,
         active_poll_interval: Duration,
+        paste_trigger: bool,
+        paste_debounce: Duration,
     },
 }
 
@@ -119,6 +124,8 @@ async fn dispatch(args: Args) -> Result<()> {
             send_current,
             poll_interval,
             active_poll_interval,
+            paste_trigger,
+            paste_debounce,
         } => {
             let backend = clipboard::Backend::detect()?;
             println!(
@@ -133,6 +140,8 @@ async fn dispatch(args: Args) -> Result<()> {
                     local_interval: interval,
                     poll_interval,
                     active_poll_interval,
+                    paste_trigger,
+                    paste_debounce,
                     send_current,
                 },
                 sync::control_socket_path(&args.state),
@@ -499,6 +508,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut interval = Duration::from_millis(400);
     let mut poll_interval = Duration::from_secs(60);
     let mut active_poll_interval = Duration::from_secs(3);
+    let mut paste_trigger = true;
+    let mut paste_debounce = Duration::from_millis(800);
     let mut send_current = false;
     let mut command: Option<&str> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -544,6 +555,16 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
                         .with_context(|| format!("--active-poll-interval 需要秒数，得到 {value}"))?,
                 );
             }
+            "--no-paste-trigger" => paste_trigger = false,
+            "--paste-trigger" => paste_trigger = true,
+            "--paste-trigger-debounce-ms" => {
+                let value = value_for("--paste-trigger-debounce-ms")?;
+                paste_debounce = Duration::from_millis(
+                    value
+                        .parse()
+                        .with_context(|| format!("--paste-trigger-debounce-ms 需要毫秒数，得到 {value}"))?,
+                );
+            }
             "--yes" => yes = true,
             "--peer" => {
                 let value = value_for("--peer")?;
@@ -587,6 +608,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
             send_current,
             poll_interval,
             active_poll_interval,
+            paste_trigger,
+            paste_debounce,
         },
         Some(other) => bail!("未知命令 {other}"),
         None => bail!("缺少命令，用 --help 查看用法"),

@@ -24,6 +24,10 @@ pub struct SyncOptions {
     pub poll_interval: Duration,
     /// 人在电脑前时的远端轮询间隔（手机复制后要尽快到本机）。
     pub active_poll_interval: Duration,
+    /// 是否用 Ctrl/右键触发即时拉取。
+    pub paste_trigger: bool,
+    /// 粘贴触发的防抖间隔。
+    pub paste_debounce: Duration,
     pub send_current: bool,
 }
 
@@ -80,6 +84,23 @@ pub async fn run(
     // 推送长连接：任何一帧到达都立刻拉一次剪贴板；连不上就纯轮询。
     let (push_tx, mut push_rx) = mpsc::channel::<u32>(8);
     tokio::spawn(notify_loop(client.clone(), push_tx));
+
+    // 「可能马上要粘贴」的输入触发：Ctrl 或鼠标右键，带防抖。
+    let (paste_tx, mut paste_rx) = mpsc::channel::<()>(4);
+    if options.paste_trigger {
+        let monitored = crate::input_watch::spawn(paste_tx.clone(), options.paste_debounce);
+        if monitored == 0 {
+            eprintln!(
+                "[wxclipd] 未找到可读的键盘/鼠标设备，粘贴触发未生效；\
+                 安装 packaging/99-wxclipd-input.rules 并重新插拔/触发 udev 后再试"
+            );
+        } else {
+            println!(
+                "[wxclipd] 粘贴触发已启用：监听 {monitored} 个输入设备，防抖 {} ms",
+                options.paste_debounce.as_millis()
+            );
+        }
+    }
 
     loop {
         tokio::select! {
@@ -140,6 +161,10 @@ pub async fn run(
             }
             Some(event_type) = push_rx.recv() => {
                 println!("[wxclipd] 服务端推送 event_type={event_type}，立即拉取剪贴板");
+                failures = poll_remote(&client, backend, &mut last_known, failures).await;
+            }
+            Some(_) = paste_rx.recv() => {
+                println!("[wxclipd] 检测到粘贴动作（Ctrl/右键），立即拉取剪贴板");
                 failures = poll_remote(&client, backend, &mut last_known, failures).await;
             }
             _ = tokio::signal::ctrl_c() => {

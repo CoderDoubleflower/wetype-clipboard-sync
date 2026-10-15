@@ -54,6 +54,8 @@ wxclipd unbind --peer UIN   # 指定要解绑的 Uin
   不推剪贴板内容**，所以手机复制后仍需本机主动拉取。
 - 轮询按在场状态自适应：人在电脑前（logind 未空闲、未锁屏）每 3 秒一次，
   离开或锁屏后退回 60 秒一次。
+- 粘贴触发：监听 Ctrl 按下与鼠标右键（防抖 800 ms，可用 `--no-paste-trigger` 关闭），
+  一有"可能要粘贴"的动作就立刻拉一次，按 Ctrl+V 时拿到的是刚同步过来的内容。
 - 轮询请求带本地已有的剪贴板版本号，服务端据此省略没变化的内容（实测单次响应约 156 字节，
   不会重复下发整段剪贴板文字）。
 
@@ -82,6 +84,10 @@ systemctl --user disable --now wxclipd   # 停用并取消自启
   会通过控制套接字交给常驻进程执行，不需要先停服务。只有 `code`（要一边显示配对码
   一边等交互确认）需要先 `systemctl --user stop wxclipd`。
 - 非官方项目，与腾讯无关联，协议可能随官方更新失效。
+- 粘贴触发要读 `/dev/input/event*`（Wayland 没有全局输入监听接口）。仓库里的
+  `packaging/60-wxclipd-input.rules` 用 udev 的 `uaccess` 只给活跃会话临时授权，
+  不会把你加进 `input` 组；但这仍意味着 wxclipd 有读取全部输入事件的能力，
+  不想要就加 `--no-paste-trigger` 并删掉该规则。
 
 ## 目录
 

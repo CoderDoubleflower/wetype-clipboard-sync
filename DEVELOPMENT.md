@@ -93,6 +93,20 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
 只有 0.06 秒）。复现：`cargo run -p wx-ime-sdk --example poll_timing -- <状态目录> <设备名> 12 1000`
 （需要先停掉 wxclipd，身份目录同一时间只能被一个进程占用）。
 
+## 粘贴触发（Ctrl/右键）
+
+手机→电脑方向服务端不推事件，所以除了轮询，还监听"可能马上要粘贴"的输入动作：
+
+- 实现：`wxclipd/src/input_watch.rs`，直接读 `/dev/input/event*`（Wayland 没有全局按键接口），
+  只在收到 `KEY_LEFTCTRL`/`KEY_RIGHTCTRL`/`BTN_RIGHT` 的"按下"事件时通知主循环去拉取；
+  其它按键只看类型不看内容，不做任何记录。
+- 防抖：所有设备共享一个时间戳，默认 800 ms（`--paste-trigger-debounce-ms`）。
+- 权限：`packaging/60-wxclipd-input.rules` 必须在 systemd 自带规则（`73-seat-late.rules`）
+  **之前**执行，否则 `uaccess` 内建拿不到标签。改完要
+  `sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input`。
+- 排查：日志里 `粘贴触发已启用：监听 N 个输入设备`；若为 0，检查规则是否生效
+  （`ls -l /dev/input/event*` 应看到 `+` 号 ACL）。
+
 ## 发布
 
 `packaging/install.sh` 把 release 二进制装到 `~/.local/bin/wxclipd` 并登记
