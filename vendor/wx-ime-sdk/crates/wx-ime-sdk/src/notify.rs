@@ -32,6 +32,7 @@ pub const NOTIFY_CMD_ID: u32 = 0x1f8a;
 /// 请求里的路径字段（官方任务参数里的全局常量）。
 pub const API_PATH: &str = "/api_v2";
 const HOST: &str = "wetype.weixin.qq.com";
+/// 服务端约 65 秒空闲就断连，WS 层 ping 不算数；实测重发业务请求可续期，取 45 秒留余量。
 const HEARTBEAT: Duration = Duration::from_secs(45);
 
 pub enum NotifyEvent {
@@ -44,8 +45,12 @@ pub enum NotifyEvent {
 }
 
 pub struct NotifyChannel {
+    client: Client,
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     key: ControlKey,
+    uin: u64,
+    device_info: String,
+    task: u32,
 }
 
 impl Client {
@@ -144,7 +149,14 @@ impl Client {
             return Err(Error::Http(status as u16));
         }
 
-        Ok(NotifyChannel { stream, key })
+        Ok(NotifyChannel {
+            client: self.clone(),
+            stream,
+            key,
+            uin,
+            device_info,
+            task: task + 1,
+        })
     }
 
     async fn device_name(&self) -> Result<String> {
@@ -161,10 +173,7 @@ impl NotifyChannel {
     pub async fn next_event(&mut self) -> Result<NotifyEvent> {
         match tokio::time::timeout(HEARTBEAT, self.stream.next()).await {
             Err(_) => {
-                self.stream
-                    .send(WsMessage::Ping(Vec::new().into()))
-                    .await
-                    .map_err(|_| Error::Transport)?;
+                self.heartbeat().await?;
                 Ok(NotifyEvent::Idle)
             }
             Ok(None) | Ok(Some(Err(_))) => Ok(NotifyEvent::Closed),
@@ -184,12 +193,41 @@ impl NotifyChannel {
             return Ok(NotifyEvent::Idle);
         }
         let plain = self.key.open(&body)?;
+        if plain.is_empty() {
+            // 心跳/订阅请求的应答，没有事件。
+            return Ok(NotifyEvent::Idle);
+        }
         let push = websocket::WebSocketPushInfo::decode(plain.as_slice())
             .map_err(wx_ime_protocol::Error::from)?;
+        if push.field1 == 0 {
+            return Ok(NotifyEvent::Idle);
+        }
         Ok(NotifyEvent::Push {
             event_type: push.field1,
             payload: push.field4,
         })
+    }
+
+    /// 业务心跳：重发一次订阅请求。WS 层 ping 不被服务端认可，实测必须发业务请求。
+    async fn heartbeat(&mut self) -> Result<()> {
+        let timestamp = self.client.session().await?.timestamp()?;
+        let plain = packet::envelope(self.uin, 0, &self.device_info, timestamp, Vec::new());
+        let (headers, body) = api_packet(
+            Endpoint::Api(NOTIFY_CMD_ID),
+            &plain,
+            &self.key,
+            self.uin,
+            timestamp,
+            self.task,
+            Some(NOTIFY_CMD_ID),
+            0,
+        )?;
+        self.task = self.task.wrapping_add(1);
+        let frame = ws_frame(&headers, &body, API_PATH)?;
+        self.stream
+            .send(WsMessage::Binary(frame.into()))
+            .await
+            .map_err(|_| Error::Transport)
     }
 }
 
