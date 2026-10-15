@@ -79,6 +79,20 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
   `cargo run -p wx-ime-sdk --example notify_probe -- <状态目录> <设备名> 60` 可单独观察事件。
   任何推送都会让守护进程立刻拉取一次剪贴板，轮询只是兜底。
 
+### 实测延迟（2026-10-16，本机 → wetype.weixin.qq.com）
+
+| 项目 | 耗时 |
+| --- | --- |
+| TCP 连接 | ~50 ms |
+| TLS 握手完成 | ~150 ms |
+| warm 连接 `/timestamp` 往返 | ~60 ms |
+| warm 连接 `/api_v2` 业务请求（拉一次剪贴板） | 中位 258–270 ms，P95 ~360 ms |
+| 建连 + 握手（timestamp + ECDH） | ~410 ms |
+
+一次拉取约 0.26 秒，其中网络往返约 0.05 秒、其余是服务端业务处理（对照 `/timestamp`
+只有 0.06 秒）。复现：`cargo run -p wx-ime-sdk --example poll_timing -- <状态目录> <设备名> 12 1000`
+（需要先停掉 wxclipd，身份目录同一时间只能被一个进程占用）。
+
 ## 发布
 
 `packaging/install.sh` 把 release 二进制装到 `~/.local/bin/wxclipd` 并登记
