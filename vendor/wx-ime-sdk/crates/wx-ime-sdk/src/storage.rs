@@ -79,6 +79,18 @@ impl Drop for State {
         self.private_pem.zeroize();
     }
 }
+impl State {
+    /// Highest clipboard revision already durably handled here, counting an
+    /// unacknowledged receipt: it is replayed from disk after a restart, so the
+    /// server does not need to send it again.
+    pub fn known_clipboard_version(&self) -> u64 {
+        let consumed = self.consumed.values().copied().max().unwrap_or(0);
+        match &self.pending {
+            Some(pending) => consumed.max(pending.id.version()),
+            None => consumed,
+        }
+    }
+}
 pub(crate) struct Store {
     pub state: State,
     pub directory: PathBuf,

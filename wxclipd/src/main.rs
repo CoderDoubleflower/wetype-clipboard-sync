@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wx_ime_sdk::{Client, ClientOptions, PairingCode, PairingUpdate};
 
 const HELP: &str = "\
@@ -20,14 +21,18 @@ wxclipd - Linux 端微信输入法跨设备剪贴板
   code              生成六位配对码，等待另一台设备输入并确认
   pair <CODE>       输入官方输入法显示的六位配对码
   devices           列出本机与已绑定设备
+  unbind [--peer UIN]  解绑一台已关联设备
   status            显示剪贴板同步状态
   run               启动剪贴板双向同步（前台运行，Ctrl-C 退出）
+  sync-now          通知正在运行的 wxclipd 立即同步一次
 
 选项:
   --state DIR       身份与状态目录，默认 $WXCLIPD_STATE 或 ~/.local/state/wxclipd
   --name NAME       设备名，仅首次创建身份时使用
+  --peer UIN        unbind 要解绑的设备 Uin（只有一台时可省略）
   --yes             配对时自动确认对方，不询问
   --interval MS     本地剪贴板轮询间隔，默认 400
+  --poll-interval S 远端轮询间隔秒数，默认 60
   --send-current    启动时把当前剪贴板内容发送一次
   -h, --help        显示帮助
 ";
@@ -42,10 +47,13 @@ enum Command {
     Code { yes: bool },
     Pair { code: String },
     Devices,
+    Unbind { peer: Option<u64>, yes: bool },
     Status,
+    SyncNow,
     Run {
         interval: Duration,
         send_current: bool,
+        poll_interval: Duration,
     },
 }
 
@@ -58,30 +66,50 @@ fn main() -> Result<()> {
 }
 
 async fn dispatch(args: Args) -> Result<()> {
+    if matches!(args.command, Command::SyncNow) {
+        return sync_now(&args.state).await;
+    }
+    // 设备列表和解绑优先走正在运行的服务，避免抢占身份锁。
+    if matches!(args.command, Command::Devices) {
+        if let Some(reply) = control_call(&args.state, "devices").await? {
+            return print_devices(&reply);
+        }
+    }
+    if let Command::Unbind { peer, yes } = &args.command {
+        if let Some(reply) = control_call(&args.state, "devices").await? {
+            return unbind_via_control(&args.state, &reply, *peer, *yes).await;
+        }
+    }
     let name = resolve_name(&args.state, args.name)?;
     let client = Client::open(ClientOptions::new(&args.state, name)).await?;
     let result = match args.command {
         Command::Code { yes } => code(&client, yes).await,
         Command::Pair { code } => pair(&client, code).await,
         Command::Devices => devices(&client).await,
+        Command::Unbind { peer, yes } => unbind_local(&client, peer, yes).await,
         Command::Status => status(&client).await,
+        Command::SyncNow => unreachable!("sync-now 不打开身份"),
         Command::Run {
             interval,
             send_current,
+            poll_interval,
         } => {
             let backend = clipboard::Backend::detect()?;
             println!(
-                "[wxclipd] 剪贴板后端: {}，设备: {}",
+                "[wxclipd] 剪贴板后端: {}，设备: {}，远端轮询: {} 秒",
                 backend.describe(),
-                client.local_device().await?.name
+                client.local_device().await?.name,
+                poll_interval.as_secs()
             );
             sync::run(
                 client.clone(),
                 backend,
                 sync::SyncOptions {
                     local_interval: interval,
+                    poll_interval,
                     send_current,
                 },
+                sync::control_socket_path(&args.state),
             )
             .await
         }
@@ -158,24 +186,139 @@ async fn pair(client: &Client, code: String) -> Result<()> {
 async fn devices(client: &Client) -> Result<()> {
     let local = client.local_device().await?;
     println!("本机: {} (Uin {})", local.name, local.uin);
-    let devices = client.devices().await?;
-    if devices.is_empty() {
+    print_peers(&local_peers(client, local.uin).await?);
+    Ok(())
+}
+
+async fn local_peers(client: &Client, own_uin: u64) -> Result<Vec<Peer>> {
+    Ok(client
+        .devices()
+        .await?
+        .into_iter()
+        .filter(|device| device.uin != own_uin)
+        .map(|device| Peer {
+            uin: device.uin,
+            name: device.name,
+            platform: device.platform as u64,
+            supports_file_transfer: device.supports_file_transfer,
+        })
+        .collect())
+}
+
+struct Peer {
+    uin: u64,
+    name: String,
+    platform: u64,
+    supports_file_transfer: bool,
+}
+
+fn print_peers(peers: &[Peer]) {
+    if peers.is_empty() {
         println!("尚未配对，运行 `wxclipd pair CODE` 或 `wxclipd code`。");
-        return Ok(());
+        return;
     }
-    for device in devices.iter().filter(|device| device.uin != local.uin) {
+    for peer in peers {
         println!(
             "已绑定: {} (Uin {}, 平台 {}{})",
-            device.name,
-            device.uin,
-            device.platform,
-            if device.supports_file_transfer {
+            peer.name,
+            peer.uin,
+            peer.platform,
+            if peer.supports_file_transfer {
                 ", 支持文件传输"
             } else {
                 ""
             }
         );
     }
+}
+
+/// 选定要解绑的设备；返回 `None` 表示没有设备或用户取消。
+fn choose_peer(peers: &[Peer], requested: Option<u64>, yes: bool) -> Result<Option<(u64, String)>> {
+    if peers.is_empty() {
+        println!("当前没有已绑定设备。");
+        return Ok(None);
+    }
+    let (uin, name) = match requested {
+        Some(uin) => peers
+            .iter()
+            .find(|peer| peer.uin == uin)
+            .map(|peer| (peer.uin, peer.name.clone()))
+            .with_context(|| format!("--peer {uin} 不在当前设备组里"))?,
+        None if peers.len() == 1 => (peers[0].uin, peers[0].name.clone()),
+        None => {
+            print_peers(peers);
+            bail!("设备组里有多台设备，请用 --peer UIN 指定要解绑的设备");
+        }
+    };
+    if !yes && !confirm(&format!("确认解绑 {name} (Uin {uin})？"))? {
+        println!("已取消");
+        return Ok(None);
+    }
+    Ok(Some((uin, name)))
+}
+
+async fn unbind_local(client: &Client, peer: Option<u64>, yes: bool) -> Result<()> {
+    let local = client.local_device().await?;
+    let peers = local_peers(client, local.uin).await?;
+    let Some((uin, name)) = choose_peer(&peers, peer, yes)? else {
+        return Ok(());
+    };
+    client.unbind(uin).await?;
+    let remaining = client.devices().await.unwrap_or_default();
+    if remaining.iter().any(|device| device.uin == uin) {
+        bail!("服务端仍返回 {name} (Uin {uin})，解绑未生效");
+    }
+    println!("已解绑 {name} (Uin {uin})");
+    Ok(())
+}
+
+async fn unbind_via_control(
+    state: &Path,
+    devices_reply: &str,
+    peer: Option<u64>,
+    yes: bool,
+) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(devices_reply.trim()).context("解析设备列表失败")?;
+    let peers = peers_from_json(&value);
+    let Some((uin, name)) = choose_peer(&peers, peer, yes)? else {
+        return Ok(());
+    };
+    control_call(state, &format!("unbind {uin}"))
+        .await?
+        .context("wxclipd 服务已退出，未执行解绑")?;
+    println!("已解绑 {name} (Uin {uin})");
+    Ok(())
+}
+
+fn peers_from_json(value: &serde_json::Value) -> Vec<Peer> {
+    value["devices"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|device| {
+            Some(Peer {
+                uin: device["uin"].as_u64()?,
+                name: device["name"].as_str().unwrap_or("?").to_string(),
+                platform: device["platform"].as_u64().unwrap_or(0),
+                supports_file_transfer: device["supports_file_transfer"]
+                    .as_bool()
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn print_devices(reply: &str) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(reply.trim()).context("解析设备列表失败")?;
+    println!(
+        "本机: {} (Uin {})",
+        value["local"]["name"].as_str().unwrap_or("?"),
+        value["local"]["uin"].as_u64().unwrap_or(0)
+    );
+    print_peers(&peers_from_json(&value));
     Ok(())
 }
 
@@ -193,6 +336,35 @@ async fn status(client: &Client) -> Result<()> {
         info.expired
     );
     Ok(())
+}
+
+/// 向正在运行的 wxclipd 发一条控制命令；服务没在运行时返回 `None`。
+/// 这些命令都不打开身份文件，避免和常驻进程抢锁。
+async fn control_call(state: &Path, command: &str) -> Result<Option<String>> {
+    let path = sync::control_socket_path(state);
+    let Ok(mut stream) = tokio::net::UnixStream::connect(&path).await else {
+        return Ok(None);
+    };
+    stream.write_all(command.as_bytes()).await?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await?;
+    if reply.trim_start().starts_with("err") {
+        bail!("{}", reply.trim());
+    }
+    Ok(Some(reply))
+}
+
+async fn sync_now(state: &Path) -> Result<()> {
+    match control_call(state, "sync").await? {
+        Some(_) => {
+            println!("已触发同步");
+            Ok(())
+        }
+        None => bail!(
+            "连接 {} 失败，wxclipd 是否在运行？",
+            sync::control_socket_path(state).display()
+        ),
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
@@ -253,7 +425,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut state = None;
     let mut name = None;
     let mut yes = false;
+    let mut peer = None;
     let mut interval = Duration::from_millis(400);
+    let mut poll_interval = Duration::from_secs(60);
     let mut send_current = false;
     let mut command: Option<&str> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -283,9 +457,25 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
                         .with_context(|| format!("--interval 需要毫秒数，得到 {value}"))?,
                 );
             }
+            "--poll-interval" => {
+                let value = value_for("--poll-interval")?;
+                poll_interval = Duration::from_secs(
+                    value
+                        .parse()
+                        .with_context(|| format!("--poll-interval 需要秒数，得到 {value}"))?,
+                );
+            }
             "--yes" => yes = true,
+            "--peer" => {
+                let value = value_for("--peer")?;
+                peer = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--peer 需要数字 Uin，得到 {value}"))?,
+                );
+            }
             "--send-current" => send_current = true,
-            "code" | "pair" | "devices" | "status" | "run" => {
+            "code" | "pair" | "devices" | "unbind" | "status" | "sync-now" | "run" => {
                 if command.is_some() {
                     bail!("只能指定一个命令");
                 }
@@ -310,10 +500,13 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
                 .context("pair 需要六位配对码，例如 `wxclipd pair 123456`")?,
         },
         Some("devices") => Command::Devices,
+        Some("unbind") => Command::Unbind { peer, yes },
         Some("status") => Command::Status,
+        Some("sync-now") => Command::SyncNow,
         Some("run") => Command::Run {
             interval,
             send_current,
+            poll_interval,
         },
         Some(other) => bail!("未知命令 {other}"),
         None => bail!("缺少命令，用 --help 查看用法"),

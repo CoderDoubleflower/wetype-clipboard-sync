@@ -80,6 +80,10 @@ message PendingTransferInvite { optional string transfer_code = 1; optional stri
 message Group { optional uint64 group_id = 1; repeated BoundInfo devices = 2; optional ClipboardMsg clipboard = 3; optional PendingTransferInvite pending_invite = 7; }
 message GroupRequest { optional uint64 uin = 1; optional uint32 platform = 2; optional uint32 filter = 3; optional uint64 clipboard_version = 4; optional string current_transfer_code = 6; }
 message GroupResponse { optional Group group = 1; optional int32 status = 2; optional string device_remark_name = 3; }
+// Linked-device unbind, command35. Field numbers read from the official 4.0.0
+// RN bundle decoder (1=uin, 2=platform, 3=unbind_uin); the response carries no fields.
+message UnbindRequest { optional uint64 uin = 1; optional uint32 platform = 2; optional uint64 unbind_uin = 3; }
+message UnbindResponse {}
 
 message ClipboardMsg { optional uint64 version = 1; optional uint32 type = 2; optional string data = 3; optional uint64 expire_at = 4; optional int64 expiration = 5; optional bytes binary_data = 6; optional uint64 from_uin = 7; optional bytes extra_info = 8; optional string trace_id = 9; }
 message SendClipboardRequest { optional uint64 uin = 1; optional uint32 platform = 2; optional ClipboardMsg msg = 3; optional uint64 group_id = 4; }

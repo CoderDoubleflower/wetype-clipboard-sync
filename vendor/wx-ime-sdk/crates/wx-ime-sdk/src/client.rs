@@ -80,12 +80,41 @@ impl Client {
             .map(Group::try_from)
             .transpose()
     }
+    /// Fetch the group while advertising which clipboard revision is already
+    /// present locally. Used by tooling to compare transfer sizes; the receive
+    /// path uses the same field internally.
+    pub async fn group_with_clipboard_version(
+        &self,
+        clipboard_version: u64,
+    ) -> Result<Option<Group>> {
+        self.session()
+            .await?
+            .group_with_version(3, Some(clipboard_version))
+            .await?
+            .as_ref()
+            .map(Group::try_from)
+            .transpose()
+    }
     pub async fn devices(&self) -> Result<Vec<crate::Device>> {
         Ok(self
             .group()
             .await?
             .map(|group| group.devices)
             .unwrap_or_default())
+    }
+    /// Remove `peer_uin` from the device group (command35).
+    ///
+    /// The response message has no fields, so success is only corroborated by
+    /// re-reading the group; callers should verify membership afterwards.
+    pub async fn unbind(&self, peer_uin: u64) -> Result<()> {
+        let mut session = self.session().await?;
+        let request = wire::UnbindRequest {
+            uin: Some(session.store.state.uin),
+            platform: Some(1),
+            unbind_uin: Some(peer_uin),
+        };
+        let _: wire::UnbindResponse = session.api(transport::UNBIND, request).await?;
+        Ok(())
     }
     pub async fn reconnect(&self) -> Result<()> {
         self.session().await?.initialize().await

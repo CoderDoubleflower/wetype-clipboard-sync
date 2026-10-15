@@ -26,6 +26,7 @@ pub const JOIN: u32 = 31;
 pub const CONFIRM_BIND: u32 = 32;
 pub const RELEASE_BIND: u32 = 33;
 pub const GROUP: u32 = 34;
+pub const UNBIND: u32 = 35;
 pub const SEND_CLIPBOARD: u32 = 36;
 pub const FETCH_BIND: u32 = 38;
 pub const POLL_CODE: u32 = 40;

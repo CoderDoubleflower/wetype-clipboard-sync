@@ -48,7 +48,11 @@ impl Client {
         let mut session = self.session().await?;
         let own = session.store.state.uin;
         let now_ms = session.timestamp()?;
-        let wire_group = session.group(3).await?.ok_or(Error::NotPaired)?;
+        let known = session.store.state.known_clipboard_version();
+        let wire_group = session
+            .group_with_version(3, Some(known))
+            .await?
+            .ok_or(Error::NotPaired)?;
         let group_id = wire_group.group_id.unwrap_or(0);
         let consumed = session
             .store
@@ -91,7 +95,8 @@ impl Client {
                 }
                 return Ok(None);
             }
-            let Some(wire_group) = session.group(3).await? else {
+            let known = session.store.state.known_clipboard_version();
+            let Some(wire_group) = session.group_with_version(3, Some(known)).await? else {
                 return Ok(None);
             };
             let group = Group::try_from(&wire_group)?;

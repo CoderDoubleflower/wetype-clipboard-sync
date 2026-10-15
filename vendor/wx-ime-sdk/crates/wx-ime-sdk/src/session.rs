@@ -229,11 +229,21 @@ impl Session {
             .map_err(wx_ime_protocol::Error::from)?)
     }
     pub async fn group(&mut self, filter: u32) -> Result<Option<wire::Group>> {
+        self.group_with_version(filter, None).await
+    }
+
+    /// `clipboard_version` tells the server which clipboard revision this device
+    /// already has, so an unchanged revision does not have to be transferred again.
+    pub async fn group_with_version(
+        &mut self,
+        filter: u32,
+        clipboard_version: Option<u64>,
+    ) -> Result<Option<wire::Group>> {
         let request = wire::GroupRequest {
             uin: Some(self.store.state.uin),
             platform: Some(1),
             filter: Some(filter),
-            clipboard_version: (filter & 2 != 0).then_some(0),
+            clipboard_version: (filter & 2 != 0).then_some(clipboard_version.unwrap_or(0)),
             current_transfer_code: None,
         };
         let response: wire::GroupResponse = self.api(transport::GROUP, request).await?;

@@ -31,7 +31,7 @@
 | 32 | CMDID_SYNC_REAL_BIND_MATCH_CODE | 确认绑定 |
 | 33 | CMDID_SYNC_RELEASE_MATCH_CODE_OR_BIND | 释放配对码 / 取消绑定 |
 | 34 | CMDID_SYNC_GET_GROUP_INFO | 拉取设备组（含剪贴板） |
-| 35 | CMDID_SYNC_UNBIND | 解绑设备 |
+| 35 | CMDID_SYNC_UNBIND | 解绑设备，`UnbindReq{uin=1, platform=2, unbindUin=3}`，响应无字段（已实现） |
 | 38 | CMDID_SYNC_FETCH_BIND_STATUS | 查询绑定状态 |
 | 39 | CMDID_SYNC_SET_GROUP_FUNC_SWITCH | 设置组功能开关 |
 | 40 | CMDID_SYNC_GET_MATCH_CODE_STATUS | 轮询配对码状态 |

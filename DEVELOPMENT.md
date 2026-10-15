@@ -49,6 +49,28 @@ cd vendor/wx-ime-sdk && cargo test --workspace -j 3
 `identity.lock`、已消费游标和图片缓存。测试时用 `--state /tmp/...` 隔离。
 同一个状态目录同一时间只能有一个进程（SDK 会加锁）。
 
+## 控制套接字
+
+`wxclipd run` 会在状态目录下创建 `control.sock`（0600），接受单行命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `sync` | 立即检查本地剪贴板并轮询一次远端 |
+| `devices` | 返回本机与已绑定设备的 JSON |
+| `unbind <uin>` | 解绑指定设备（命令 35） |
+
+因此 `wxclipd devices` / `unbind` / `sync-now` 在常驻服务运行时也能用，不需要先停服务；
+这些子命令优先走套接字，连不上才自己打开身份文件。
+
+## 轮询与带宽
+
+- 本地剪贴板默认 400 ms 检查一次（`--interval`），只在内容变化时才发网络请求。
+- 远端默认 60 秒轮询一次（`--poll-interval`）。请求携带本地已有版本号，
+  服务端会省略未变化的剪贴板内容，实测单次响应约 156 字节；
+  不携带版本号时响应会包含整段剪贴板文本。
+- `cargo run --example probe_group -- ~/.local/state/wxclipd [测试文本]` 可复现这个对比。
+  它会在状态目录下写 `capture-*`（含明文响应），用完自行删除。
+
 ## 发布
 
 `packaging/install.sh` 把 release 二进制装到 `~/.local/bin/wxclipd` 并登记

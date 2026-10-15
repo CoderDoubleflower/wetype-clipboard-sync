@@ -78,6 +78,19 @@ message HeaderItem   { string key = 1; string value = 2; }
 
 `GroupRequest.filter` 位含义（实测）：bit0 取组成员，bit1 取剪贴板，bit6 取待处理传输邀请。
 
+### 省流：`clipboard_version`
+
+`GroupRequest.clipboard_version` 传本地已有的剪贴板版本号时，服务端会省略没有变化的内容。
+2026-10-15 在同一设备组实测（先发一段 2023 字节文本，再连续请求两次）：
+
+| 请求 | 响应明文 |
+| --- | --- |
+| `clipboard_version=0` | 2241 字节（含整段文本） |
+| `clipboard_version=当前版本` | 156 字节（只剩组成员信息） |
+
+所以客户端只要在轮询时带上本地游标，重复轮询就不会反复传输同一份剪贴板内容；
+不传该字段（或传 0）会让服务端每次都把最新内容下发一遍。
+
 ## 剪贴板消息
 
 ```proto
