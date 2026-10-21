@@ -25,7 +25,7 @@ cargo build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
 使用 i686 主机工具链，使 OpenSSL 的构建脚本和目标程序都使用同一种 CPU 架构：
 
 ```powershell
-rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal
+rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal --force-non-host
 $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
 
 cargo +1.92.0-i686-pc-windows-msvc test --locked --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
