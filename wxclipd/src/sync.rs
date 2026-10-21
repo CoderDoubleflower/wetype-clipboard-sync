@@ -7,6 +7,7 @@
 mod state;
 
 use crate::clipboard::{self, Backend, Payload};
+use crate::runtime_status::{LocalOperation, RuntimeStatus};
 use anyhow::{anyhow, Context, Result};
 use state::{PublishFailure, ReceiptPhase, Retry, State};
 use std::path::{Path, PathBuf};
@@ -80,6 +81,7 @@ pub async fn run(
     options: SyncOptions,
     control: PathBuf,
     listener: Option<crate::ipc::Listener>,
+    runtime_status: RuntimeStatus,
 ) -> Result<()> {
     let notify = Arc::new(Notify::new());
     let stop = Arc::new(Notify::new());
@@ -89,6 +91,7 @@ pub async fn run(
         notify.clone(),
         stop.clone(),
         client.clone(),
+        runtime_status.clone(),
     )?;
     println!(
         "[wxclipd] 控制端点: {}（sync-now 立即同步，stop 停止）",
@@ -148,10 +151,12 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = stop.notified() => {
+                runtime_status.stopping();
                 println!("[wxclipd] 收到停止请求");
                 break Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
+                runtime_status.stopping();
                 println!("[wxclipd] 退出");
                 break Ok(());
             }
@@ -163,11 +168,13 @@ pub async fn run(
                 match result {
                     NetworkResult::Sent { generation, description, result } => match result {
                         Ok(receipt) => {
+                            runtime_status.sent();
                             state.sent(generation, receipt.group, receipt.version);
                             poll_requested = true;
                             println!("[wxclipd] 已发送{description}（group {} version {}）", receipt.group, receipt.version);
                         }
                         Err(error) => {
+                            runtime_status.network_failed(&error);
                             let failure = publish_failure(&error);
                             let current = state.outgoing.as_ref().is_some_and(|pending| pending.generation == generation);
                             state.send_failed(generation, failure, Instant::now());
@@ -182,18 +189,23 @@ pub async fn run(
                     },
                     NetworkResult::Polled { generation, result } => match result {
                         Ok(Some(received)) => {
+                            runtime_status.network_succeeded();
                             poll_retry.reset(Instant::now());
                             if state.received(received, generation, Instant::now()) {
                                 println!("[wxclipd] 本机已有更新的复制内容，已丢弃过时的远端值");
                             }
                         }
-                        Ok(None) => poll_retry.reset(Instant::now()),
+                        Ok(None) => {
+                            runtime_status.network_succeeded();
+                            poll_retry.reset(Instant::now());
+                        },
                         Err(wx_ime_sdk::Error::InvalidClipboard { id, reason }) => {
                             poll_retry.reset(Instant::now());
                             eprintln!("[wxclipd] 远端图片无效或超过限制（{reason}），将拒收此版本后继续同步");
                             state.received_invalid(id, Instant::now());
                         }
                         Err(error) => {
+                            runtime_status.network_failed(&error);
                             poll_retry.failed(Instant::now());
                             poll_requested = true;
                             eprintln!("[wxclipd] 拉取失败（第 {} 次，将退避重试）: {error}", poll_retry.failures);
@@ -201,37 +213,44 @@ pub async fn run(
                     },
                     NetworkResult::Prepared { id, result } => match result {
                         Ok(payload) => {
+                            runtime_status.local_result(LocalOperation::Prepare, true);
                             // A newer local copy may have deliberately ended
                             // this receipt while the image was being decoded.
                             state.prepared(&id, payload, Instant::now());
                         }
                         Err(PrepareFailure::Retry(error)) => {
                             if state.preparation_failed(&id, Instant::now()) {
+                                runtime_status.local_result(LocalOperation::Prepare, false);
                                 eprintln!("[wxclipd] 暂时无法准备已下载的图片，保留消息稍后重试: {error:#}");
                             }
                         }
                         Err(PrepareFailure::Invalid(error)) => {
                             if state.invalid_image(&id, Instant::now()) {
+                                runtime_status.local_result(LocalOperation::Prepare, true);
                                 eprintln!("[wxclipd] 远端图片损坏、格式不支持或超过限制，已跳过此版本: {error:#}");
                             }
                         }
                     },
                     NetworkResult::Acknowledged { id, result } => match result {
                         Ok(()) => {
+                            runtime_status.local_result(LocalOperation::Acknowledge, true);
                             state.acknowledged(&id);
                             poll_requested = true;
                         }
                         Err(error) => {
+                            runtime_status.local_result(LocalOperation::Acknowledge, false);
                             state.incoming_failed(Instant::now());
                             eprintln!("[wxclipd] 保存接收确认失败，将重试；不会重复写入剪贴板: {error}");
                         }
                     },
                     NetworkResult::Discarded { id, result } => match result {
                         Ok(()) => {
+                            runtime_status.local_result(LocalOperation::Discard, true);
                             state.discarded(&id);
                             poll_requested = true;
                         }
                         Err(error) => {
+                            runtime_status.local_result(LocalOperation::Discard, false);
                             state.discard_failed(&id, Instant::now());
                             eprintln!("[wxclipd] 保存无效图片的拒收记录失败，将重试同一版本: {error}");
                         }
@@ -239,12 +258,12 @@ pub async fn run(
                 }
             }
             _ = local_tick.tick() => {
-                observe_clipboard(backend, &mut state, &mut read_failed).await;
+                observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await;
             }
             _ = notify.notified() => {
                 // Observe first so an explicit retry never republishes a value
                 // that the user replaced since the last periodic observation.
-                if observe_clipboard(backend, &mut state, &mut read_failed).await {
+                if observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await {
                     state.force_retry(Instant::now());
                 }
                 poll_requested = true;
@@ -258,8 +277,9 @@ pub async fn run(
         }
 
         if state.apply_due(Instant::now()) {
-            apply_incoming(backend, &mut state, &mut read_failed).await;
+            apply_incoming(backend, &mut state, &mut read_failed, &runtime_status).await;
         }
+        update_local_status(&runtime_status, &state);
         if in_flight || state.observed.is_none() {
             continue;
         }
@@ -270,7 +290,7 @@ pub async fn run(
             // A retry may be due between local timer ticks, or after a long
             // clipboard read failure. Never resend an obsolete observation
             // without first checking what the user currently has copied.
-            if !observe_clipboard(backend, &mut state, &mut read_failed).await {
+            if !observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await {
                 continue;
             }
         }
@@ -326,9 +346,40 @@ pub async fn run(
     outcome
 }
 
-async fn observe_clipboard(backend: Backend, state: &mut State, read_failed: &mut bool) -> bool {
+fn update_local_status(runtime_status: &RuntimeStatus, state: &State) {
+    runtime_status.queue(
+        state.outgoing.is_some(),
+        state
+            .outgoing
+            .as_ref()
+            .is_some_and(|pending| pending.paused),
+    );
+    // Superseding a receipt also ends any local retry associated with it.
+    // Do not leave a stale write/decode error after a new local copy wins.
+    let phase = state.incoming.as_ref().map(|pending| pending.phase);
+    for (operation, expected) in [
+        (LocalOperation::Prepare, ReceiptPhase::Prepare),
+        (LocalOperation::Write, ReceiptPhase::Apply),
+        (LocalOperation::Acknowledge, ReceiptPhase::Acknowledge),
+    ] {
+        if phase != Some(expected) {
+            runtime_status.local_result(operation, true);
+        }
+    }
+    if state.invalid.is_none() {
+        runtime_status.local_result(LocalOperation::Discard, true);
+    }
+}
+
+async fn observe_clipboard(
+    backend: Backend,
+    state: &mut State,
+    read_failed: &mut bool,
+    runtime_status: &RuntimeStatus,
+) -> bool {
     match clipboard::read_snapshot(backend).await {
         Ok(snapshot) => {
+            runtime_status.local_result(LocalOperation::Read, true);
             *read_failed = false;
             let applying = state
                 .incoming
@@ -340,6 +391,7 @@ async fn observe_clipboard(backend: Backend, state: &mut State, read_failed: &mu
             true
         }
         Err(error) => {
+            runtime_status.local_result(LocalOperation::Read, false);
             if !*read_failed {
                 eprintln!("[wxclipd] 暂时无法读取剪贴板，稍后重试: {error:#}");
             }
@@ -349,10 +401,15 @@ async fn observe_clipboard(backend: Backend, state: &mut State, read_failed: &mu
     }
 }
 
-async fn apply_incoming(backend: Backend, state: &mut State, read_failed: &mut bool) {
+async fn apply_incoming(
+    backend: Backend,
+    state: &mut State,
+    read_failed: &mut bool,
+    runtime_status: &RuntimeStatus,
+) {
     // A fresh read catches copies made after the last timer tick. On Windows the
     // conditional write rechecks under the same clipboard lock as the write.
-    if !observe_clipboard(backend, state, read_failed).await {
+    if !observe_clipboard(backend, state, read_failed, runtime_status).await {
         state.incoming_failed(Instant::now());
         return;
     }
@@ -376,6 +433,7 @@ async fn apply_incoming(backend: Backend, state: &mut State, read_failed: &mut b
         .clone();
     match clipboard::write_if_unchanged(backend, &expected, &payload).await {
         Ok(Some(written)) => {
+            runtime_status.received();
             state.applied(written, Instant::now());
             println!(
                 "[wxclipd] 已接收来自 {source} 的{}",
@@ -384,10 +442,11 @@ async fn apply_incoming(backend: Backend, state: &mut State, read_failed: &mut b
         }
         Ok(None) => {
             state.discard_incoming(Instant::now());
-            observe_clipboard(backend, state, read_failed).await;
+            observe_clipboard(backend, state, read_failed, runtime_status).await;
             println!("[wxclipd] 写入前发现本机剪贴板已更新，已保留本机内容");
         }
         Err(error) => {
+            runtime_status.local_result(LocalOperation::Write, false);
             state.incoming_failed(Instant::now());
             eprintln!("[wxclipd] 写入剪贴板失败，保留消息稍后重试: {error:#}");
         }
@@ -560,6 +619,7 @@ fn spawn_control(
     notify: Arc<Notify>,
     stop: Arc<Notify>,
     client: Client,
+    runtime_status: RuntimeStatus,
 ) -> Result<JoinHandle<()>> {
     let mut listener = match listener {
         Some(listener) => listener,
@@ -575,6 +635,7 @@ fn spawn_control(
                         let notify = notify.clone();
                         let stop = stop.clone();
                         let client = client.clone();
+                        let runtime_status = runtime_status.clone();
                         connections.spawn(async move {
                             let mut buffer = Vec::with_capacity(256);
                             let read = {
@@ -593,6 +654,7 @@ fn spawn_control(
                             let reply = match command {
                                 "sync" => { notify.notify_one(); "ok\n".to_string() },
                                 "ping" => format!("ok {}\n", std::process::id()),
+                                "inspect" => runtime_status.reply(),
                                 "stop" => "ok\n".to_string(),
                                 command => match timeout(Duration::from_secs(120), control_command(&client, command)).await {
                                     Ok(reply) => reply,
@@ -733,6 +795,54 @@ mod image_tests {
             bytes: bytes.len(),
             sha256: format!("{:x}", Sha256::digest(bytes)),
         }
+    }
+
+    #[test]
+    fn status_clears_superseded_local_errors_and_keeps_paused_send_visible() {
+        let now = Instant::now();
+        let mut state = State::new(false);
+        let runtime_status = RuntimeStatus::new(
+            &crate::config::Config::default(),
+            "direct",
+            "test-pc".into(),
+            Duration::from_millis(400),
+        )
+        .unwrap();
+        runtime_status.initialized("test-pc".into());
+        state.observe(
+            Snapshot {
+                content: None,
+                revision: None,
+            },
+            now,
+        );
+        state.received(
+            receipt(serde_json::json!({"Text": "incoming"}), 11),
+            state.generation,
+            now,
+        );
+        runtime_status.local_result(LocalOperation::Write, false);
+        update_local_status(&runtime_status, &state);
+        assert_eq!(runtime_status.value()["phase"], "retrying");
+        state.observe(
+            Snapshot {
+                content: Some(Payload::Text("new local copy".into())),
+                revision: None,
+            },
+            now,
+        );
+        let generation = state.outgoing.as_ref().unwrap().generation;
+        state.send_failed(generation, PublishFailure::OutcomeUnknown, now);
+        update_local_status(&runtime_status, &state);
+        assert!(
+            runtime_status.value()["last_error"].is_null(),
+            "discarded receipt no longer has a write failure"
+        );
+        assert_eq!(runtime_status.value()["pending_send"], true);
+        assert_eq!(runtime_status.value()["send_paused"], true);
+        state.force_retry(now);
+        update_local_status(&runtime_status, &state);
+        assert_eq!(runtime_status.value()["send_paused"], false);
     }
 
     #[tokio::test]

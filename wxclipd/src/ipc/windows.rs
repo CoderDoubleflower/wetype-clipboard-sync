@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{
-    LocalFree, ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
+    ERROR_PIPE_BUSY, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -19,7 +20,8 @@ use windows_sys::Win32::Security::{
     TOKEN_USER,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    CreateMutexW, GetCurrentProcess, OpenMutexW, OpenProcess, OpenProcessToken,
+    WaitForSingleObject, PROCESS_SYNCHRONIZE, SYNCHRONIZATION_SYNCHRONIZE,
 };
 
 pub fn endpoint(state: &Path) -> Result<PathBuf> {
@@ -37,6 +39,57 @@ pub fn endpoint(state: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(format!(
         r"\\.\pipe\wxclipd-{sid}-{hash:016x}"
     )))
+}
+
+/// Presence of this per-user/state object covers setup commands launched from
+/// the tray, a Start-menu shortcut, or a terminal. Keeping the handle alive is
+/// enough; no thread-affine mutex ownership is needed across async awaits.
+pub struct SetupGuard {
+    _handle: OwnedHandle,
+}
+
+fn setup_mutex_name(state: &Path) -> Result<Vec<u16>> {
+    let endpoint = endpoint(state)?;
+    let pipe_name = endpoint.file_name().context("无法确定设置窗口的实例名")?;
+    let mut name = std::ffi::OsString::from(r"Local\wxclipd-setup-");
+    name.push(pipe_name);
+    Ok(name.encode_wide().chain(Some(0)).collect())
+}
+
+pub fn begin_setup(state: &Path) -> Result<SetupGuard> {
+    let name = setup_mutex_name(state)?;
+    let sid = current_user_sid()?;
+    let descriptor = SecurityDescriptor::new(&format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)"))?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let raw = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
+    if raw.is_null() {
+        return Err(std::io::Error::last_os_error()).context("无法登记设置窗口");
+    }
+    let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if exists {
+        bail!("此状态目录已有设置与配对窗口，请先完成或关闭现有窗口。");
+    }
+    Ok(SetupGuard { _handle: handle })
+}
+
+pub fn setup_in_progress(state: &Path) -> Result<bool> {
+    let name = setup_mutex_name(state)?;
+    let raw = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if raw.is_null() {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_FILE_NOT_FOUND {
+            return Ok(false);
+        }
+        return Err(std::io::Error::from_raw_os_error(error as i32))
+            .context("无法确认设置与配对窗口是否已关闭");
+    }
+    let _handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    Ok(true)
 }
 
 pub fn prepare_state_dir(state: &Path) -> Result<()> {
@@ -254,6 +307,30 @@ mod tests {
     use super::*;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
     use windows_sys::Win32::Security::{GetAce, ACCESS_ALLOWED_ACE, ACL, PSID};
+
+    #[test]
+    fn setup_presence_is_exclusive_scoped_and_released_without_state_files() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        assert!(!setup_in_progress(first.path()).unwrap());
+        let guard = begin_setup(first.path()).unwrap();
+        assert!(setup_in_progress(first.path()).unwrap());
+        assert!(
+            begin_setup(first.path()).is_err(),
+            "duplicate setup must not stop the first window's worker"
+        );
+        assert!(
+            !setup_in_progress(second.path()).unwrap(),
+            "a separate state directory has an independent setup window"
+        );
+        let other = begin_setup(second.path()).unwrap();
+        drop(guard);
+        assert!(!setup_in_progress(first.path()).unwrap());
+        assert!(setup_in_progress(second.path()).unwrap());
+        drop(other);
+        assert!(!setup_in_progress(second.path()).unwrap());
+        assert_eq!(std::fs::read_dir(first.path()).unwrap().count(), 0);
+    }
 
     #[tokio::test]
     async fn native_pipe_dacl_has_only_current_user_and_system() {

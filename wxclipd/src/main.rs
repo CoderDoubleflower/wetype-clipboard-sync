@@ -6,6 +6,7 @@ mod config;
 mod image;
 mod input_watch;
 mod ipc;
+mod runtime_status;
 mod sync;
 
 use anyhow::{bail, Context, Result};
@@ -29,6 +30,7 @@ wxclipd - Windows / Linux 微信输入法跨设备剪贴板
   devices           列出本机与已绑定设备
   unbind [--peer UIN]  解绑一台已关联设备
   status            显示剪贴板同步状态
+  inspect           显示本地运行状态 JSON（不访问网络）
   run               启动剪贴板双向同步（前台运行，Ctrl-C 退出）
   start             Windows 后台运行，日志写入状态目录
   stop              停止当前用户的后台同步
@@ -58,6 +60,7 @@ struct Args {
     name: Option<String>,
     settings: config::Config,
     explicit_settings: bool,
+    proxy_source: &'static str,
     command: Command,
 }
 
@@ -78,6 +81,7 @@ enum Command {
         yes: bool,
     },
     Status,
+    Inspect,
     SyncNow,
     Run {
         interval: Duration,
@@ -92,7 +96,18 @@ fn main() -> Result<()> {
     let tokens: Vec<String> = std::env::args().skip(1).collect();
     let interactive =
         tokens.iter().any(|arg| arg == "setup") || (cfg!(windows) && tokens.is_empty());
-    let result = real_main(tokens);
+    // Keep the setup presence guard through both successful and failed setup
+    // prompts, including a setup window launched directly from a shortcut.
+    #[cfg(windows)]
+    let mut setup_guard = None;
+    let result = (|| {
+        let args = parse(tokens.into_iter())?;
+        #[cfg(windows)]
+        if matches!(args.command, Command::Setup) {
+            setup_guard = Some(ipc::begin_setup(&args.state)?);
+        }
+        real_main(args)
+    })();
     if interactive && result.is_err() {
         if let Err(error) = &result {
             eprintln!("设置失败：{error:#}");
@@ -102,8 +117,7 @@ fn main() -> Result<()> {
     result
 }
 
-fn real_main(tokens: Vec<String>) -> Result<()> {
-    let args = parse(tokens.into_iter())?;
+fn real_main(args: Args) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -111,6 +125,23 @@ fn real_main(tokens: Vec<String>) -> Result<()> {
 }
 
 async fn dispatch(args: Args) -> Result<()> {
+    if matches!(args.command, Command::Inspect) {
+        match control_call(&args.state, "inspect").await? {
+            Some(reply) => {
+                let value: serde_json::Value = serde_json::from_str(
+                    reply
+                        .strip_prefix("ok ")
+                        .context("后台返回了无效的运行状态")?,
+                )?;
+                println!("{value}");
+            }
+            None => println!(
+                "{}",
+                serde_json::json!({"schema": 1, "pid": null, "phase": "stopped"})
+            ),
+        }
+        return Ok(());
+    }
     if matches!(args.command, Command::Config) {
         if args.explicit_settings {
             args.settings.save(&args.state)?;
@@ -144,11 +175,16 @@ async fn dispatch(args: Args) -> Result<()> {
         if args.explicit_settings {
             args.settings.save(&args.state)?;
         }
-        if control_call(&args.state, "ping").await?.is_some() {
-            println!("同步进程已经运行；更新配置后请先 stop。");
-            return Ok(());
-        }
-        return start_background(&args.state, &args.settings, args.name.as_deref());
+        // The resident tray attaches to an existing worker and deduplicates
+        // repeated launches. Always invoke it so a CLI-started worker gains a
+        // visible status/configuration entry point too.
+        return start_background(
+            &args.state,
+            &args.settings,
+            args.proxy_source,
+            args.name.as_deref(),
+            false,
+        );
     }
     if matches!(args.command, Command::SyncNow) {
         return sync_now(&args.state).await;
@@ -182,6 +218,16 @@ async fn dispatch(args: Args) -> Result<()> {
     }
     ipc::prepare_state_dir(&args.state)?;
     let name = resolve_name(&args.state, args.name)?;
+    let local_interval = match &args.command {
+        Command::Run { interval, .. } => *interval,
+        _ => Duration::from_millis(400),
+    };
+    let runtime_status = runtime_status::RuntimeStatus::new(
+        &args.settings,
+        args.proxy_source,
+        name.clone(),
+        local_interval,
+    )?;
     let mut options = ClientOptions::new(&args.state, name);
     options.proxy = args
         .settings
@@ -193,7 +239,8 @@ async fn dispatch(args: Args) -> Result<()> {
         // Detect the desktop before registering a device or opening the network.
         clipboard::Backend::detect()?;
         let mut listener = ipc::listen(&ipc::endpoint(&args.state)?)?;
-        let Some(client) = open_for_run(options, &mut listener).await? else {
+        let Some(client) = open_for_run(options, &mut listener, runtime_status.clone()).await?
+        else {
             #[cfg(unix)]
             let _ = std::fs::remove_file(ipc::endpoint(&args.state)?);
             return Ok(());
@@ -221,7 +268,12 @@ async fn dispatch(args: Args) -> Result<()> {
         Command::Devices => devices(&client).await,
         Command::Unbind { peer, yes } => unbind_local(&client, peer, yes).await,
         Command::Status => status(&client).await,
-        Command::SyncNow | Command::Setup | Command::Config | Command::Start | Command::Stop => {
+        Command::SyncNow
+        | Command::Setup
+        | Command::Config
+        | Command::Start
+        | Command::Stop
+        | Command::Inspect => {
             unreachable!("该命令不打开身份")
         }
         Command::Run {
@@ -232,10 +284,12 @@ async fn dispatch(args: Args) -> Result<()> {
             paste_debounce,
         } => {
             let backend = clipboard::Backend::detect()?;
+            let local_name = client.local_device().await?.name;
+            runtime_status.initialized(local_name.clone());
             println!(
                 "[wxclipd] 剪贴板后端: {}，设备: {}",
                 backend.describe(),
-                client.local_device().await?.name
+                local_name
             );
             sync::run(
                 client.clone(),
@@ -249,6 +303,7 @@ async fn dispatch(args: Args) -> Result<()> {
                 },
                 ipc::endpoint(&args.state)?,
                 listener,
+                runtime_status,
             )
             .await
         }
@@ -263,6 +318,7 @@ async fn dispatch(args: Args) -> Result<()> {
 async fn open_for_run(
     options: ClientOptions,
     listener: &mut ipc::Listener,
+    runtime_status: runtime_status::RuntimeStatus,
 ) -> Result<Option<Client>> {
     let initialize = async {
         let mut delay = 2;
@@ -276,6 +332,7 @@ async fn open_for_run(
                     | wx_ime_sdk::Error::Http(_)
                     | wx_ime_sdk::Error::Timeout(_)),
                 ) => {
+                    runtime_status.network_failed(&error);
                     eprintln!("[wxclipd] 初始化连接失败：{error}；{delay} 秒后重试，可用 wxclipd stop 停止。");
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     delay = (delay * 2).min(60);
@@ -288,7 +345,10 @@ async fn open_for_run(
     loop {
         tokio::select! {
             result = &mut initialize => return result.map(Some),
-            _ = tokio::signal::ctrl_c() => return Ok(None),
+            _ = tokio::signal::ctrl_c() => {
+                runtime_status.stopping();
+                return Ok(None);
+            },
             stream = listener.accept() => {
                 let mut reader = BufReader::new(stream?).take(256);
                 let mut command = String::new();
@@ -300,12 +360,16 @@ async fn open_for_run(
                 let stop = command.trim() == "stop";
                 let reply = match command.trim() {
                     "ping" => format!("ok {}\n", std::process::id()),
+                    "inspect" => runtime_status.reply(),
                     "stop" => "ok\n".to_owned(),
                     _ => "err 网络连接正在初始化，请稍后重试；可以 stop 停止。\n".to_owned(),
                 };
                 let _ = tokio::time::timeout(Duration::from_secs(2), stream.write_all(reply.as_bytes())).await;
                 let _ = stream.shutdown().await;
-                if stop { return Ok(None); }
+                if stop {
+                    runtime_status.stopping();
+                    return Ok(None);
+                }
             }
         }
     }
@@ -377,22 +441,45 @@ async fn setup(mut args: Args) -> Result<()> {
         shutdown?;
     }
     #[cfg(windows)]
-    start_background(&args.state, &args.settings, args.name.as_deref())?;
+    start_background(
+        &args.state,
+        &args.settings,
+        "command",
+        args.name.as_deref(),
+        true,
+    )?;
     #[cfg(not(windows))]
     println!("设置完成，运行 wxclipd run 启动同步。");
     let _ = prompt("按 Enter 关闭设置窗口：");
     Ok(())
 }
 
-fn start_background(state: &Path, settings: &config::Config, name: Option<&str>) -> Result<()> {
+fn start_background(
+    state: &Path,
+    settings: &config::Config,
+    proxy_source: &str,
+    name: Option<&str>,
+    setup_complete: bool,
+) -> Result<()> {
     #[cfg(windows)]
     {
         let launcher = std::env::current_exe()?.with_file_name("wxclipd-background.exe");
         let mut command = std::process::Command::new(launcher);
         command.arg("--state").arg(state);
-        // Preserve the already-resolved command-line > environment > file
-        // priority across both launcher processes without putting secrets in argv.
-        command.env("WXCLIPD_PROXY", settings.proxy.as_deref().unwrap_or(""));
+        if setup_complete {
+            command.env("WXCLIPD_SETUP_COMPLETE", "1");
+        } else {
+            command.env_remove("WXCLIPD_SETUP_COMPLETE");
+        }
+        // Explicit start options and setup have already saved their choice.
+        // Do not turn a saved value into a permanent environment override in
+        // the resident tray: subsequent restarts must read the updated file.
+        // A genuine environment override retains its documented precedence.
+        if proxy_source == "environment" {
+            command.env("WXCLIPD_PROXY", settings.proxy.as_deref().unwrap_or(""));
+        } else {
+            command.env_remove("WXCLIPD_PROXY");
+        }
         if let Some(name) = name {
             command.env("WXCLIPD_NAME", name);
         } else {
@@ -402,14 +489,14 @@ fn start_background(state: &Path, settings: &config::Config, name: Option<&str>)
             .spawn()
             .context("启动后台程序失败，请确认 wxclipd-background.exe 在同一目录")?;
         println!(
-            "已启动后台同步。日志：{}",
+            "已打开托盘同步程序。可通过右下角图标查看运行状态与配置。日志：{}",
             state.join("wxclipd.log").display()
         );
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = (state, settings, name);
+        let _ = (state, settings, proxy_source, name, setup_complete);
         bail!("start 命令用于 Windows；Linux 请使用 wxclipd run 或 systemd 用户服务")
     }
 }
@@ -877,7 +964,7 @@ fn parse_with_proxy_env(
             }
             "--send-current" => send_current = true,
             "setup" | "config" | "start" | "stop" | "code" | "pair" | "devices" | "unbind"
-            | "status" | "sync-now" | "run" => {
+            | "status" | "inspect" | "sync-now" | "run" => {
                 if command.is_some() {
                     bail!("只能指定一个命令");
                 }
@@ -900,7 +987,7 @@ fn parse_with_proxy_env(
         proxy_override.is_some() || poll_seconds.is_some() || paste_trigger_override.is_some();
     // These commands only address the already-running process. An edited or
     // damaged configuration must never prevent stopping it (including uninstall).
-    if matches!(command, Some("stop" | "sync-now")) {
+    if matches!(command, Some("stop" | "sync-now" | "inspect")) {
         if !positional.is_empty() {
             bail!("多余的参数: {}", positional.join(" "));
         }
@@ -909,14 +996,24 @@ fn parse_with_proxy_env(
             name,
             settings: config::Config::default(),
             explicit_settings,
-            command: if command == Some("stop") {
-                Command::Stop
-            } else {
-                Command::SyncNow
+            proxy_source: "direct",
+            command: match command {
+                Some("stop") => Command::Stop,
+                Some("inspect") => Command::Inspect,
+                _ => Command::SyncNow,
             },
         });
     }
     let setup = command == Some("setup") || (command.is_none() && cfg!(windows));
+    let proxy_source = if proxy_override.is_some() {
+        "command"
+    } else if proxy_environment.is_some() {
+        "environment"
+    } else if config::path(&state).exists() {
+        "config"
+    } else {
+        "direct"
+    };
     let effective_proxy = proxy_override.or_else(|| {
         proxy_environment.map(|proxy| {
             if proxy.trim().is_empty() {
@@ -976,6 +1073,7 @@ fn parse_with_proxy_env(
         Some("devices") => Command::Devices,
         Some("unbind") => Command::Unbind { peer, yes },
         Some("status") => Command::Status,
+        Some("inspect") => Command::Inspect,
         Some("sync-now") => Command::SyncNow,
         Some("run") => Command::Run {
             interval,
@@ -999,6 +1097,7 @@ fn parse_with_proxy_env(
         name,
         settings,
         explicit_settings,
+        proxy_source,
         command,
     })
 }
@@ -1026,10 +1125,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = config::path(directory.path());
         std::fs::write(&path, b"{broken JSON").unwrap();
-        for command in ["stop", "sync-now"] {
+        for command in ["stop", "sync-now", "inspect"] {
             let args = parse_in_with_env(directory.path(), &[command], Some("file:///bad-proxy"))
                 .expect("local IPC must not depend on network settings");
-            assert!(matches!(args.command, Command::Stop | Command::SyncNow));
+            assert!(matches!(
+                args.command,
+                Command::Stop | Command::SyncNow | Command::Inspect
+            ));
         }
         assert_eq!(std::fs::read(&path).unwrap(), b"{broken JSON");
     }
@@ -1112,6 +1214,7 @@ mod tests {
             args.settings.proxy.as_deref(),
             Some("socks5h://chosen.example:1080")
         );
+        assert_eq!(args.proxy_source, "command");
         let args = parse_in_with_env(
             directory.path(),
             &["run"],
@@ -1122,6 +1225,7 @@ mod tests {
             args.settings.proxy.as_deref(),
             Some("http://environment.example:8080")
         );
+        assert_eq!(args.proxy_source, "environment");
         let args = parse_in_with_env(directory.path(), &["run"], Some("")).unwrap();
         assert!(
             args.settings.proxy.is_none(),
@@ -1132,6 +1236,7 @@ mod tests {
             args.settings.proxy.as_deref(),
             Some("http://saved.example:8080")
         );
+        assert_eq!(args.proxy_source, "config");
     }
 
     #[test]
@@ -1176,7 +1281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_works_while_proxy_is_unavailable() {
+    async fn inspect_and_stop_work_while_proxy_is_unavailable_and_config_changes() {
         let directory = tempfile::tempdir().unwrap();
         ipc::prepare_state_dir(directory.path()).unwrap();
         let endpoint = ipc::endpoint(directory.path()).unwrap();
@@ -1184,13 +1289,59 @@ mod tests {
         let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = unused.local_addr().unwrap();
         drop(unused);
+        let proxy_url = format!("http://private-user:private-password@{address}");
         let mut options = ClientOptions::new(directory.path(), "offline-test");
-        options.proxy = Some(ProxyConfig::parse(&format!("http://{address}")).unwrap());
-        let task = tokio::spawn(async move { open_for_run(options, &mut listener).await });
+        options.proxy = Some(ProxyConfig::parse(&proxy_url).unwrap());
+        let settings = config::Config {
+            proxy: Some(proxy_url),
+            poll_interval_seconds: 17,
+            paste_trigger: false,
+        };
+        let runtime_status = runtime_status::RuntimeStatus::new(
+            &settings,
+            "config",
+            "offline-test".into(),
+            Duration::from_millis(700),
+        )
+        .unwrap();
+        let task =
+            tokio::spawn(async move { open_for_run(options, &mut listener, runtime_status).await });
         assert_eq!(
             ipc::call(directory.path(), "ping").await.unwrap(),
             Some(format!("ok {}", std::process::id()))
         );
+        // Inspect is independent of both the pending connection attempt and
+        // later edits to the saved configuration. It reports the running one.
+        std::fs::write(config::path(directory.path()), b"{broken JSON").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = tokio::time::timeout(
+                Duration::from_secs(2),
+                ipc::call(directory.path(), "inspect"),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            assert!(!reply.contains("private-user"));
+            assert!(!reply.contains("private-password"));
+            let value: serde_json::Value =
+                serde_json::from_str(reply.strip_prefix("ok ").unwrap()).unwrap();
+            assert_eq!(value["poll_interval_seconds"], 17);
+            assert_eq!(value["paste_trigger"], false);
+            assert_eq!(value["local_poll_interval_ms"], 700);
+            assert!(value["last_success_at"].is_null());
+            if value["phase"] == "retrying" {
+                assert!(value["last_error"].is_string());
+                break;
+            }
+            assert_eq!(value["phase"], "initializing");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "offline initialization must enter retry status"
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
         assert_eq!(
             ipc::call(directory.path(), "stop")
                 .await

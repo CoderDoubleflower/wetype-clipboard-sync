@@ -1,4 +1,4 @@
-# WeType Clipboard Sync 0.3.0 · Windows 使用说明
+# WeType Clipboard Sync 0.4.0 · Windows 使用说明
 
 本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 及以上**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
 
@@ -8,10 +8,10 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| `wetype-clipboard-sync-0.3.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
-| `wetype-clipboard-sync-0.3.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd.exe` |
+| `wetype-clipboard-sync-0.4.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
+| `wetype-clipboard-sync-0.4.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
-安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成页的 **Configure proxy and pair with my phone** 会打开设置向导。
+安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，托盘窗口标题为 **WeType 剪贴板同步**。
 
 设置向导依次询问：
 
@@ -26,9 +26,35 @@
 
 Windows 版本尚未使用真实手机账号完成端到端实测，需要在你的手机、代理和桌面会话中验证首次配对及双向同步。
 
-### 从 0.2.0 升级
+### 从 0.2.0 / 0.3.0 升级
 
-先通过 **Stop Sync** 停止旧版，再运行 0.3.0 安装包覆盖安装。配对身份和代理配置保存在状态目录中，升级会保留它们。已有配对可在设置向导中跳过配对步骤。便携版先停止进程，再完整解压新版覆盖程序文件。
+运行 0.4.0 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
+
+## 托盘、状态与配置
+
+双击右下角微信输入法图标，打开状态与配置窗口；右键图标打开操作菜单。如果任务栏没有直接显示图标，请展开 `^` 隐藏图标区域，也可以从开始菜单再次打开程序。重复启动会定位已有托盘，不会再启动一套同步进程。Windows 资源管理器重启后，程序会重新登记图标。
+
+状态窗口定期刷新，提供：
+
+- **运行情况**：初始化、运行、连接重试或已停止，最近一次错误提示。
+- **当前实际配置**：代理类型与地址（隐藏用户名、密码）、代理来源、远端轮询间隔、本地检查间隔、粘贴触发开关。
+- **同步记录**：本次运行的发送 / 接收次数和最近时间、待发送与发送结果不确定的提示。它不展示剪贴板内容，也不是跨重启的历史记录。
+- **本机信息**：设备名、版本、状态目录，以及磁盘中保存的配置。保存的配置与运行配置可能不同，修改后用「重启同步」应用。
+
+状态读取使用本地控制通道，不会为了刷新窗口额外请求微信服务。网络或代理不可用时仍可查看与停止；“运行中”表示同步循环已启动，最近成功时间才说明何时有操作成功，不能把进程存在等同于持续在线。
+
+| 托盘操作 | 作用 |
+| --- | --- |
+| 状态与配置 | 打开或定位状态窗口 |
+| 开始同步 | 使用当前设置启动后台同步 |
+| 停止同步 | 停止收发，保留托盘入口 |
+| 重启同步 | 重新加载配置并启动同步 |
+| 立即同步 | 请求检查本地剪贴板并提前拉取远端 |
+| 设置与配对 | 打开现有控制台向导，修改代理、轮询间隔或完成手机配对 |
+| 查看日志 / 打开配置目录 | 打开当前状态目录的日志或文件夹 |
+| 退出 | 停止同步并退出托盘 |
+
+关闭状态窗口只隐藏窗口，程序继续在托盘运行。「设置与配对」期间会停止同步；向导完成后恢复。向导最后显示「按 Enter 关闭窗口」时请按 Enter 结束；设置窗口仍在时，退出或升级会提示先关闭它，避免未结束的向导在退出后重新启动程序。保存后仍受真正设置的 `WXCLIPD_PROXY` 环境变量影响时，可在状态中的代理来源辨认。
 
 ## 图片怎么同步
 
@@ -53,22 +79,25 @@ Windows 版本尚未使用真实手机账号完成端到端实测，需要在你
 
 | 入口 | 作用 |
 | --- | --- |
+| **WeType Clipboard Sync** | 打开托盘与状态窗口 |
 | **Setup and Pair** | 修改代理、轮询间隔并完成配对 |
-| **Start Sync** | 启动后台同步 |
+| **Start Sync** | 启动托盘及后台同步 |
 | **Stop Sync** | 停止后台同步 |
 | **Sync Now** | 请求正在运行的进程尽快同步一次 |
 | **Windows Guide** | 打开本说明 |
 | **Uninstall** | 卸载程序 |
 
-程序没有托盘设置界面。便携版可通过双击 `wxclipd.exe` 进入设置向导，或双击 `wxclipd-background.exe` 启动已有配置；**这两个文件必须在同一目录**。便携包不自动登记登录自启。
+便携版双击 `wxclipd-background.exe` 启动托盘；双击 `wxclipd.exe` 仍可进入设置向导。**这两个文件必须在同一目录**。便携包不自动登记登录自启。
 
 也可以在程序目录打开 PowerShell，运行：
 
 ```powershell
 .\wxclipd.exe start
+.\wxclipd.exe inspect
 .\wxclipd.exe status
 .\wxclipd.exe sync-now
 .\wxclipd.exe stop
+.\wxclipd-background.exe --quit
 ```
 
 默认日志位于 `%LOCALAPPDATA%\wxclipd\wxclipd.log`。查看最近日志并持续跟踪：
@@ -77,7 +106,7 @@ Windows 版本尚未使用真实手机账号完成端到端实测，需要在你
 Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 ```
 
-`start` 返回只表示启动了后台进程，网络初始化仍可能在重试；有问题时查看日志。`sync-now` 返回只表示同步请求已受理，并不是本轮收发完成的确认。
+`start` 返回表示请求启动托盘与后台进程，网络初始化仍可能在重试；有问题时查看状态窗口及日志。`inspect` 返回本地运行快照 JSON，即使配置文件损坏也可查询已有进程；`status` 继续查看远端剪贴板状态。`stop` 保留托盘，`wxclipd-background.exe --quit` 才会同时停止同步并退出托盘。`sync-now` 返回只表示同步请求已受理，并不是本轮收发完成的确认。
 
 前台排错时先停止后台进程，再运行：
 
@@ -118,7 +147,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 .\wxclipd.exe start
 ```
 
-查看当前有效配置使用 `.\wxclipd.exe config`。显示时会隐藏用户名密码，但保存的代理 URL 保留原始凭据。
+托盘窗口显示运行进程实际使用的配置。`.\wxclipd.exe config` 查看下一次命令将解析到的配置；两者在修改文件后、重启前可能不同。显示时会隐藏用户名密码，但保存的代理 URL 保留原始凭据。
 
 配置优先级是 **命令行 `--proxy` / `--no-proxy` > 环境变量 `WXCLIPD_PROXY` > `config.json` > 直连**。空的 `WXCLIPD_PROXY` 表示直连；若该变量仍存在，它会覆盖文件内的代理。普通临时命令不会更改已运行的后台进程，**保存后需要 `stop` 再 `start`**。
 
@@ -195,7 +224,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 发布页同时提供 `SHA256SUMS.txt`。PowerShell 可计算下载文件的校验值，与对应行比较：
 
 ```powershell
-Get-FileHash .\wetype-clipboard-sync-0.3.0-windows-x86-setup.exe -Algorithm SHA256
+Get-FileHash .\wetype-clipboard-sync-0.4.0-windows-x86-setup.exe -Algorithm SHA256
 ```
 
 本项目是非官方协议实现，与腾讯无关联。更多源码、Linux 使用说明和许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。

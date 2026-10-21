@@ -31,7 +31,7 @@ $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-stati
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.3.0
+./packaging/windows/build-package.ps1 -Version 0.4.0
 ```
 
 Windows 的应用与 SDK 测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。Linux 仍额外验证独立 SDK workspace。
@@ -41,7 +41,8 @@ Windows 的应用与 SDK 测试共用应用的 lockfile、release profile 和 ta
 - CLI、后台启动器和安装器为 x86 PE32；CLI/启动器的 Windows 子系统设置正确。
 - release 可执行文件可以运行，版本标识为 `windows-x86`。
 - 不依赖 OpenSSL 或 MSVC C++ 动态运行库。
-- 当前用户模式安装、后台进程启动、停止和卸载能够完成。
+- 可执行文件与安装器包含微信输入法图标，资源版本与 Cargo 版本一致。
+- 当前用户模式安装、常驻托盘、状态窗口、单实例、后台启停、旧版本升级与运行中卸载能够完成。
 
 Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。
 
@@ -50,7 +51,9 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 | 路径 | 职责 |
 | --- | --- |
 | `wxclipd/src/main.rs` | 命令行、交互配置/配对、离线启动重试 |
-| `wxclipd/src/background.rs` | Windows 无控制台启动器、日志重定向 |
+| `wxclipd/src/background.rs` | Windows GUI 子系统入口 |
+| `wxclipd/src/tray.rs` | 常驻托盘、状态窗口、后台进程管理与日志入口 |
+| `wxclipd/src/runtime_status.rs` | 本地运行快照、收发计数与凭据安全的状态输出 |
 | `wxclipd/src/config.rs` | 配置验证与原子保存 |
 | `wxclipd/src/clipboard/` | Win32 剪贴板和 Wayland/X11 后端 |
 | `wxclipd/src/image.rs` | 有界图片解码、PNG/JPEG 编码、像素指纹与接收缓存校验 |
@@ -81,13 +84,20 @@ Windows 状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒�
 | 请求 | 作用 |
 | --- | --- |
 | `ping` | 返回 daemon 进程 ID |
+| `inspect` | 返回本地运行快照 JSON；不请求网络，也不等待 SDK 锁 |
 | `stop` | 请求退出；CLI 等待进程结束 |
 | `sync` | 检查本地剪贴板并拉取远端 |
 | `devices` / `status` | 返回设备/剪贴板状态 JSON |
 | `pair <code>` | 输入手机配对码并等待手机确认 |
 | `unbind <uin>` | 解绑指定设备 |
 
-初始化网络失败时仍可 `ping` 和 `stop`，其余命令返回初始化状态。`code` 需要前台交互，运行前先停 daemon。
+初始化网络失败时仍可 `ping`、`inspect` 和 `stop`，其余命令返回初始化状态。`code` 需要前台交互，运行前先停 daemon。
+
+Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shell 通知区域图标与状态窗口；`wxclipd.exe run` 继续负责实际同步。托盘按状态目录去重，复用同一用户已有的同步进程。`stop` 仅停止同步，托盘保留；`wxclipd-background.exe --quit` 同时停止同步并等待托盘退出，用于卸载。升级兼容没有托盘、也不支持 `--quit` 的 0.3.0 启动器。
+
+状态窗口通过后台线程定期调用本地 `inspect`；不能在窗口消息线程进行网络请求或长时间等待。运行快照不包含剪贴板内容、代理凭据、设备密钥或完整远端错误。计数及最近收发时间仅属于当前同步进程，不持久化。窗口展示运行时配置与保存配置的差别，避免把磁盘修改误当成已经生效。
+
+图标采用原始品牌资源并派生多个 Windows ICO 尺寸，来源与权利说明随仓库保留；不能将其混入原创代码的 MIT 授权。构建时将图标和版本资源嵌入两个可执行文件，安装器也使用同一图标。托盘处理 `TaskbarCreated` 以恢复资源管理器重启后的图标，退出时删除图标。
 
 ## 同步状态约定
 

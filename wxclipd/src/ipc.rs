@@ -16,6 +16,8 @@ use linux as platform;
 use windows as platform;
 
 pub use platform::{endpoint, listen, prepare_state_dir, Listener};
+#[cfg(windows)]
+pub use windows::{begin_setup, setup_in_progress};
 
 pub trait ControlStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> ControlStream for T {}

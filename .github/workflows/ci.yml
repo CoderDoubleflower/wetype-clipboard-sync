@@ -115,6 +115,7 @@ jobs:
             dist/*-windows-x86-setup.exe
             dist/*-windows-x86-portable.zip
             dist/SHA256SUMS.txt
+            dist/windows-tray-status.png
 
   release:
     name: Publish Windows release
@@ -143,5 +144,5 @@ jobs:
           fi
           gh release create "$tag" dist/*.exe dist/*.zip dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$tag — Windows x86 image clipboard sync + HTTP/SOCKS proxies" \
+            --title "$tag — Windows tray, live status and settings + image sync" \
             --notes-file packaging/windows/RELEASE-NOTES.md

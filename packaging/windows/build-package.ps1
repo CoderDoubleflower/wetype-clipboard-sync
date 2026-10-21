@@ -17,7 +17,9 @@ Copy-Item (Join-Path $Root 'LICENSE') $Package
 Copy-Item (Join-Path $Root 'THIRD_PARTY.md') $Package
 Copy-Item (Join-Path $PSScriptRoot 'README-Windows.md') $Package
 Copy-Item (Join-Path $PSScriptRoot 'config.example.json') $Package
+Copy-Item (Join-Path $Root 'wxclipd/assets/wetype.ico') $Package
 New-Item -ItemType Directory -Force (Join-Path $Package 'licenses') | Out-Null
+Copy-Item (Join-Path $Root 'wxclipd/assets/README.md') (Join-Path $Package 'licenses/wetype-icon-NOTICE.md')
 Copy-Item (Join-Path $Root 'vendor/wx-ime-sdk/LICENSE') (Join-Path $Package 'licenses/wx-ime-sdk-LICENSE')
 $CargoDirectory = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
 # Include the license/notice files shipped by every downloaded registry crate.
