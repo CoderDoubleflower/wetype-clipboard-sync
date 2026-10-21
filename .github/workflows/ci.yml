@@ -75,7 +75,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
           'C:\Program Files\NASM' | Out-File -FilePath $env:GITHUB_PATH -Append
           'C:\Strawberry\perl\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
-      - uses: actions/cache@v4
+      - name: Restore Windows build cache
+        id: windows-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -99,6 +101,16 @@ jobs:
         run: |
           cargo +"$env:RUST_VERSION-i686-pc-windows-msvc" build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
+      - name: Save tested Windows build cache
+        if: steps.windows-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            wxclipd/target
+            vendor/wx-ime-sdk/target
+          key: ${{ steps.windows-cache.outputs.cache-primary-key }}
       - name: Build Windows x86 installer
         timeout-minutes: 8
         shell: pwsh
@@ -113,6 +125,13 @@ jobs:
           $Manifest = Get-Content wxclipd/Cargo.toml -Raw
           $Version = [regex]::Match($Manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
           ./packaging/windows/verify-package.ps1 -Version $Version
+      - name: Upload Windows diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-diagnostics
+          if-no-files-found: ignore
+          path: dist/windows-tray-status.png
       - name: Upload tested Windows packages
         uses: actions/upload-artifact@v4
         with:
@@ -122,7 +141,6 @@ jobs:
             dist/*-windows-x86-setup.exe
             dist/*-windows-x86-portable.zip
             dist/SHA256SUMS.txt
-            dist/windows-tray-status.png
 
   release:
     name: Publish Windows release

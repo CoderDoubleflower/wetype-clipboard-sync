@@ -716,7 +716,10 @@ unsafe extern "system" fn controller_proc(
     if message == WM_NCCREATE {
         let create = &*(lparam as *const CREATESTRUCTW);
         SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as _);
-        return 1;
+        // DefWindowProc stores CREATESTRUCT.lpszName as the window title. Merely
+        // returning TRUE leaves it empty and prevents a second process from
+        // finding this controller by its per-state instance title.
+        return DefWindowProcW(window, message, wparam, lparam);
     }
     let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Ui;
     if pointer.is_null() {
@@ -996,7 +999,7 @@ unsafe extern "system" fn status_proc(
     if message == WM_NCCREATE {
         let create = &*(lparam as *const CREATESTRUCTW);
         SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as _);
-        return 1;
+        return DefWindowProcW(window, message, wparam, lparam);
     }
     let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Ui;
     if pointer.is_null() {
@@ -1035,6 +1038,76 @@ unsafe extern "system" fn status_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_window_creation_preserves_titles_and_instance_discovery() {
+        // Exercise both production window procedures without starting a worker
+        // or touching the user's state. A null Ui pointer deliberately delegates
+        // subsequent messages to DefWindowProc; WM_NCCREATE still takes exactly
+        // the production path that used to discard the title.
+        let procedures: [WNDPROC; 2] = [Some(controller_proc), Some(status_proc)];
+        for (index, procedure) in procedures.into_iter().enumerate() {
+            let instance = unsafe { GetModuleHandleW(null()) };
+            let class_name = wide(&format!(
+                "WxclipdTrayTitleTest-{}-{index}",
+                std::process::id()
+            ));
+            let class = WNDCLASSW {
+                lpfnWndProc: procedure,
+                hInstance: instance,
+                lpszClassName: class_name.as_ptr(),
+                ..Default::default()
+            };
+            assert_ne!(unsafe { RegisterClassW(&class) }, 0);
+            struct TestWindow {
+                window: HWND,
+                class_name: Vec<u16>,
+            }
+            impl Drop for TestWindow {
+                fn drop(&mut self) {
+                    unsafe {
+                        if !self.window.is_null() {
+                            DestroyWindow(self.window);
+                        }
+                        UnregisterClassW(self.class_name.as_ptr(), GetModuleHandleW(null()));
+                    }
+                }
+            }
+            let title = "WeType 状态与配置 — 单实例测试🙂";
+            let expected = wide(title);
+            let window = TestWindow {
+                window: unsafe {
+                    CreateWindowExW(
+                        WS_EX_TOOLWINDOW,
+                        class_name.as_ptr(),
+                        expected.as_ptr(),
+                        WS_OVERLAPPEDWINDOW,
+                        0,
+                        0,
+                        400,
+                        300,
+                        null_mut(),
+                        null_mut(),
+                        instance,
+                        null(),
+                    )
+                },
+                class_name,
+            };
+            assert!(!window.window.is_null());
+            let mut actual = [0u16; 128];
+            let count =
+                unsafe { GetWindowTextW(window.window, actual.as_mut_ptr(), actual.len() as i32) };
+            assert_eq!(
+                String::from_utf16(&actual[..count as usize]).unwrap(),
+                title
+            );
+            assert_eq!(
+                unsafe { FindWindowW(window.class_name.as_ptr(), expected.as_ptr()) },
+                window.window
+            );
+        }
+    }
 
     #[test]
     fn tray_arguments_and_utf16_tooltip_have_strict_boundaries() {
