@@ -99,12 +99,19 @@ jobs:
         run: |
           cargo +"$env:RUST_VERSION-i686-pc-windows-msvc" build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
-      - name: Package and verify Windows x86 release
+      - name: Build Windows x86 installer
+        timeout-minutes: 8
         shell: pwsh
         run: |
           $Manifest = Get-Content wxclipd/Cargo.toml -Raw
           $Version = [regex]::Match($Manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
           ./packaging/windows/build-package.ps1 -Version $Version
+      - name: Verify Windows x86 installer and tray
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $Manifest = Get-Content wxclipd/Cargo.toml -Raw
+          $Version = [regex]::Match($Manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
           ./packaging/windows/verify-package.ps1 -Version $Version
       - name: Upload tested Windows packages
         uses: actions/upload-artifact@v4
