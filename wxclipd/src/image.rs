@@ -13,7 +13,7 @@ use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::TryReserveError;
 use std::fs::File;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 pub const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
@@ -122,14 +122,15 @@ impl ClipboardImage {
         Self::from_encoded(&bytes)
     }
 
-    /// Windows CF_DIB / CF_DIBV5 have no BMP file header. The BMP decoder handles
-    /// row direction, palettes and channel masks without handwritten pixel parsing.
+    /// Windows CF_DIB / CF_DIBV5 have no BMP file header. Supply an explicit
+    /// pixel offset: image 0.25.10's headerless decoder skips an extra 12 mask
+    /// bytes for V4/V5 even though those masks are already inside the header.
     pub fn from_dib(bytes: &[u8]) -> Result<Self> {
         ensure!(
             !bytes.is_empty() && bytes.len() <= MAX_RGBA_BYTES + 1024 * 1024,
             "剪贴板位图数据过大或为空"
         );
-        let decoder = BmpDecoder::new_without_file_header(Cursor::new(bytes))
+        let decoder = BmpDecoder::new(BufReader::new(DibFile::new(bytes)?))
             .context("无法读取剪贴板位图头")?;
         let rgba = decode_bounded(decoder)?.into_rgba8();
         let (width, height) = rgba.dimensions();
@@ -227,6 +228,187 @@ impl ClipboardImage {
     }
 }
 
+/// Present the small BMP file header and borrowed packed DIB as one seekable
+/// stream. This avoids another copy of a bitmap that can already be 64 MiB.
+struct DibFile<'a> {
+    header: [u8; 14],
+    dib: &'a [u8],
+    position: u64,
+}
+
+impl<'a> DibFile<'a> {
+    fn new(dib: &'a [u8]) -> Result<Self> {
+        let pixel_offset = dib_pixel_offset(dib)?;
+        let file_size = u32::try_from(dib.len() + 14).context("位图文件过大")?;
+        let mut header = [0; 14];
+        header[..2].copy_from_slice(b"BM");
+        header[2..6].copy_from_slice(&file_size.to_le_bytes());
+        header[10..14].copy_from_slice(&(pixel_offset as u32 + 14).to_le_bytes());
+        Ok(Self {
+            header,
+            dib,
+            position: 0,
+        })
+    }
+}
+
+impl Read for DibFile<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut copied = 0;
+        if self.position < self.header.len() as u64 {
+            let start = self.position as usize;
+            let count = buffer.len().min(self.header.len() - start);
+            buffer[..count].copy_from_slice(&self.header[start..start + count]);
+            self.position += count as u64;
+            copied += count;
+        }
+        let length = (self.header.len() + self.dib.len()) as u64;
+        if self.position >= self.header.len() as u64 && self.position < length {
+            let start = self.position as usize - self.header.len();
+            let count = (buffer.len() - copied).min(self.dib.len() - start);
+            buffer[copied..copied + count].copy_from_slice(&self.dib[start..start + count]);
+            self.position += count as u64;
+            copied += count;
+        }
+        Ok(copied)
+    }
+}
+
+impl Seek for DibFile<'_> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+            SeekFrom::End(offset) => {
+                (self.header.len() + self.dib.len()) as i128 + i128::from(offset)
+            }
+        };
+        self.position = u64::try_from(position)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid bitmap seek"))?;
+        Ok(self.position)
+    }
+}
+
+fn dib_field<const N: usize>(dib: &[u8], offset: usize) -> Result<[u8; N]> {
+    dib.get(offset..offset + N)
+        .and_then(|bytes| bytes.try_into().ok())
+        .context("剪贴板位图头不完整")
+}
+
+fn dib_pixel_offset(dib: &[u8]) -> Result<usize> {
+    let header = u32::from_le_bytes(dib_field(dib, 0)?) as usize;
+    ensure!(
+        matches!(header, 12 | 40 | 52 | 56 | 108 | 124) && header <= dib.len(),
+        "不支持或不完整的剪贴板位图头"
+    );
+    let (width, height, bits, compression, image_size, colors, color_bytes, masks) = if header == 12
+    {
+        let width = u16::from_le_bytes(dib_field(dib, 4)?) as u32;
+        let height = u16::from_le_bytes(dib_field(dib, 6)?) as u32;
+        ensure!(
+            u16::from_le_bytes(dib_field(dib, 8)?) == 1,
+            "位图平面数无效"
+        );
+        let bits = u16::from_le_bytes(dib_field(dib, 10)?);
+        ensure!(matches!(bits, 1 | 4 | 8 | 24), "不支持的核心位图位深");
+        let colors = if bits <= 8 { 1usize << bits } else { 0 };
+        (width, height, bits, 0, 0, colors, 3, 0)
+    } else {
+        let width = i32::from_le_bytes(dib_field(dib, 4)?);
+        let height = i32::from_le_bytes(dib_field(dib, 8)?);
+        ensure!(width > 0 && height != 0, "位图尺寸无效");
+        ensure!(
+            u16::from_le_bytes(dib_field(dib, 12)?) == 1,
+            "位图平面数无效"
+        );
+        let bits = u16::from_le_bytes(dib_field(dib, 14)?);
+        let compression = u32::from_le_bytes(dib_field(dib, 16)?);
+        ensure!(
+            matches!(
+                (compression, bits),
+                (0, 1 | 2 | 4 | 8 | 16 | 24 | 32) | (1, 8) | (2, 4) | (3, 16 | 32)
+            ),
+            "不支持的位图压缩或位深"
+        );
+        ensure!(
+            height > 0 || matches!(compression, 0 | 3),
+            "压缩位图不能自顶向下排列"
+        );
+        let image_size = u32::from_le_bytes(dib_field(dib, 20)?) as usize;
+        let used = u32::from_le_bytes(dib_field(dib, 32)?) as usize;
+        let colors = if bits <= 8 {
+            let maximum = 1usize << bits;
+            ensure!(used <= maximum, "位图调色板长度无效");
+            if used == 0 {
+                maximum
+            } else {
+                used
+            }
+        } else {
+            used
+        };
+        // Only BITMAPINFOHEADER has external RGB masks. V2/V3/V4/V5
+        // include them in their declared header size.
+        let masks = if header == 40 && compression == 3 {
+            12
+        } else {
+            0
+        };
+        (
+            width as u32,
+            height.unsigned_abs(),
+            bits,
+            compression,
+            image_size,
+            colors,
+            4,
+            masks,
+        )
+    };
+    check_dimensions(width, height)?;
+    let pixel_offset = colors
+        .checked_mul(color_bytes)
+        .and_then(|palette| header.checked_add(masks)?.checked_add(palette))
+        .filter(|&offset| offset <= dib.len())
+        .context("位图调色板或掩码不完整")?;
+    let pixel_bytes = if matches!(compression, 0 | 3) {
+        let stride = (width as usize * bits as usize).div_ceil(32) * 4;
+        let required = stride
+            .checked_mul(height as usize)
+            .context("位图像素长度溢出")?;
+        ensure!(
+            image_size == 0 || image_size >= required,
+            "位图像素长度无效"
+        );
+        required.max(image_size)
+    } else {
+        ensure!(image_size > 0, "压缩位图缺少像素长度");
+        image_size
+    };
+    let pixel_end = pixel_offset
+        .checked_add(pixel_bytes)
+        .filter(|&end| end <= dib.len())
+        .context("剪贴板位图像素不完整")?;
+    if header == 124 {
+        let color_space = u32::from_le_bytes(dib_field(dib, 56)?);
+        // In a packed clipboard DIB, an embedded/linked profile follows the
+        // pixels. Validate its range; never open a linked profile filename.
+        if matches!(color_space, 0x4d42_4544 | 0x4c49_4e4b) {
+            let profile_offset = u32::from_le_bytes(dib_field(dib, 112)?) as usize;
+            let profile_size = u32::from_le_bytes(dib_field(dib, 116)?) as usize;
+            ensure!(
+                profile_size > 0
+                    && profile_offset >= pixel_end
+                    && profile_offset
+                        .checked_add(profile_size)
+                        .is_some_and(|end| end <= dib.len()),
+                "位图颜色配置范围无效或与像素重叠"
+            );
+        }
+    }
+    Ok(pixel_offset)
+}
+
 pub fn check_dimensions(width: u32, height: u32) -> Result<usize> {
     ensure!(
         width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION,
@@ -313,6 +495,129 @@ impl Write for LimitedWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dib_info_header(
+        size: usize,
+        width: i32,
+        height: i32,
+        bits: u16,
+        compression: u32,
+    ) -> Vec<u8> {
+        let mut dib = vec![0; size];
+        dib[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+        dib[4..8].copy_from_slice(&width.to_le_bytes());
+        dib[8..12].copy_from_slice(&height.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&bits.to_le_bytes());
+        dib[16..20].copy_from_slice(&compression.to_le_bytes());
+        dib
+    }
+
+    fn dib_alpha_header(size: usize, width: i32, height: i32) -> Vec<u8> {
+        let mut dib = dib_info_header(size, width, height, 32, 3);
+        dib[40..44].copy_from_slice(&0x00ff_0000u32.to_le_bytes());
+        dib[44..48].copy_from_slice(&0x0000_ff00u32.to_le_bytes());
+        dib[48..52].copy_from_slice(&0x0000_00ffu32.to_le_bytes());
+        dib[52..56].copy_from_slice(&0xff00_0000u32.to_le_bytes());
+        dib[56..60].copy_from_slice(&0x7352_4742u32.to_le_bytes());
+        dib
+    }
+
+    #[test]
+    fn packed_dib_v4_v5_preserve_alpha_without_skipping_embedded_masks() {
+        for header_size in [108, 124] {
+            let mut dib = dib_alpha_header(header_size, 2, -2);
+            // BGRA pixels immediately follow the complete V4/V5 header. There
+            // are no additional masks between that header and the pixel data.
+            dib.extend_from_slice(&[0, 0, 255, 255, 0, 255, 0, 128, 7, 8, 9, 0, 255, 0, 0, 255]);
+            let decoded = ClipboardImage::from_dib(&dib).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 2));
+            assert_eq!(
+                decoded.rgba().unwrap(),
+                [255, 0, 0, 255, 0, 255, 0, 128, 9, 8, 7, 0, 0, 0, 255, 255],
+                "BITMAP header size {header_size}"
+            );
+            dib.pop();
+            assert!(ClipboardImage::from_dib(&dib).is_err());
+        }
+    }
+
+    #[test]
+    fn packed_dib_info24_preserves_bottom_up_rows_and_padding() {
+        let mut dib = dib_info_header(40, 2, 2, 24, 0);
+        dib.extend_from_slice(&[
+            255, 0, 0, 255, 255, 255, 0, 0, // bottom: blue, white, padding
+            0, 0, 255, 0, 255, 0, 0, 0, // top: red, green, padding
+        ]);
+        assert_eq!(
+            ClipboardImage::from_dib(&dib).unwrap().rgba().unwrap(),
+            [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn packed_dib_info16_uses_external_rgb565_masks() {
+        let mut dib = dib_info_header(40, 2, 1, 16, 3);
+        for mask in [0xf800u32, 0x07e0, 0x001f] {
+            dib.extend_from_slice(&mask.to_le_bytes());
+        }
+        dib.extend_from_slice(&[0x00, 0xf8, 0xe0, 0x07]); // red, green
+        assert_eq!(
+            ClipboardImage::from_dib(&dib).unwrap().rgba().unwrap(),
+            [255, 0, 0, 255, 0, 255, 0, 255]
+        );
+        dib.truncate(48); // missing part of the external blue mask
+        assert!(ClipboardImage::from_dib(&dib).is_err());
+    }
+
+    #[test]
+    fn packed_dib_palettes_use_header_specific_entry_sizes_and_reject_overflow() {
+        let mut core = Vec::new();
+        core.extend_from_slice(&12u32.to_le_bytes());
+        for field in [1u16, 1, 1, 1] {
+            core.extend_from_slice(&field.to_le_bytes());
+        }
+        core.extend_from_slice(&[0, 0, 0, 0, 0, 255]); // two RGBTRIPLE entries
+        core.extend_from_slice(&[0x80, 0, 0, 0]);
+        assert_eq!(
+            ClipboardImage::from_dib(&core).unwrap().rgba().unwrap(),
+            [255, 0, 0, 255]
+        );
+
+        let mut info = dib_info_header(40, 1, 1, 8, 0);
+        info[32..36].copy_from_slice(&2u32.to_le_bytes());
+        info.extend_from_slice(&[0, 0, 0, 0, 0, 255, 0, 0]); // two RGBQUAD entries
+        info.extend_from_slice(&[1, 0, 0, 0]);
+        assert_eq!(
+            ClipboardImage::from_dib(&info).unwrap().rgba().unwrap(),
+            [0, 255, 0, 255]
+        );
+        info[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(ClipboardImage::from_dib(&info).is_err());
+        info[14..16].copy_from_slice(&32u16.to_le_bytes());
+        assert!(ClipboardImage::from_dib(&info).is_err());
+    }
+
+    #[test]
+    fn packed_dib_v5_profiles_follow_pixels_and_never_open_linked_paths() {
+        for profile_type in [0x4d42_4544u32, 0x4c49_4e4b] {
+            let mut dib = dib_alpha_header(124, 1, -1);
+            let profile = b"missing-color-profile.icc\0";
+            dib[56..60].copy_from_slice(&profile_type.to_le_bytes());
+            dib[112..116].copy_from_slice(&128u32.to_le_bytes());
+            dib[116..120].copy_from_slice(&(profile.len() as u32).to_le_bytes());
+            dib.extend_from_slice(&[3, 2, 1, 128]);
+            dib.extend_from_slice(profile);
+            assert_eq!(
+                ClipboardImage::from_dib(&dib).unwrap().rgba().unwrap(),
+                [1, 2, 3, 128]
+            );
+            dib[112..116].copy_from_slice(&124u32.to_le_bytes());
+            assert!(ClipboardImage::from_dib(&dib).is_err()); // overlaps pixels
+            dib[112..116].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(ClipboardImage::from_dib(&dib).is_err()); // overflows/range
+        }
+    }
 
     #[test]
     fn png_roundtrip_preserves_transparency_and_pixel_identity() {

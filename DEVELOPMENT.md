@@ -101,6 +101,8 @@ Windows 状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒�
 
 图片快照通过 `Arc` 共享，比较尺寸及 RGBA 的 SHA-256；Windows 按剪贴板序列号缓存解码结果。识别顺序为 PNG、DIBV5、DIB、文本。网络图片上限 16 MiB，解码像素上限 64 MiB RGBA、每边 16384；decoder 另有分配限制。保留 JPEG 编码，位图默认 PNG，超限时仅不透明图片可降为 JPEG 95/90。有限长度 writer 必须检查编码器返回值和 writer 的溢出、分配失败状态：PNG 的最终 IEND 写入可发生在 Drop 中。
 
+读取 Windows packed DIB 时，适配层计算并校验像素起点，补上具有显式 `bfOffBits` 的 BMP 文件头，再交给解码器。`image` 0.25.10 的无文件头 BMP 路径会对 V4/V5 的 `BI_BITFIELDS` 额外跳过 12 字节，原生测试已覆盖由此导致的解码失败与透明度丢失。V4/V5 的掩码已经包含在结构中；仅旧 40 字节 `BITMAPINFOHEADER` 使用外置掩码。参见 [Microsoft BITMAPV5HEADER](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapv5header) 的 `bV5Compression` 与 packed DIB 说明，以及 [V4 结构布局](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wmf/071b0c0d-c2df-4f1c-9828-d03c26002c61)。
+
 确定无效的图片不阻塞后续内容：完整 receipt 的解码错误进入确认阶段；SDK 在 receipt 创建前发现坏引用、超限或完整性错误时返回 `InvalidClipboard`，应用使用精确 ID 的 `discard_clipboard`。临时网络、文件 I/O 和可识别的分配错误保留并重试；游标持久化失败恢复旧状态。缓存清理保留待确认图片，过滤符号链接和 Windows reparse point。
 
 ## 测试与发布
