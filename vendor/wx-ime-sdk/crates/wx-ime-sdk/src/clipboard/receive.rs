@@ -1,12 +1,12 @@
 use crate::{
     Client, ClipboardContent, ClipboardInfo, DownloadedImage, Error, Event, Group,
-    ReceivedClipboard, ReceivedId, Result, clipboard::cos::MAX_IMAGE_BYTES, storage::private_dir,
+    ReceivedClipboard, ReceivedId, Result,
+    clipboard::cos::MAX_IMAGE_BYTES,
+    storage::{prepare_image_cache, read_cached_image},
 };
-use std::{
-    fs::{self, File},
-    io::Write,
-    time::Duration,
-};
+#[cfg(unix)]
+use std::fs::File;
+use std::{io::Write, time::Duration};
 use wx_ime_protocol::{
     clipboard::{self, CosUrl, ImageReference},
     crypto::sha256,
@@ -16,6 +16,39 @@ use wx_ime_protocol::{
 pub(crate) struct ReceiveState {
     group: Option<Group>,
     emitted: Option<ReceivedId>,
+    rejected: Option<ReceivedId>,
+}
+
+#[cfg(test)]
+mod tests;
+impl ReceiveState {
+    fn reject_image(&mut self, id: &ReceivedId, reason: &'static str) -> Error {
+        self.rejected = Some(id.clone());
+        Error::InvalidClipboard {
+            id: id.clone(),
+            reason,
+        }
+    }
+
+    fn image_error(&mut self, id: &ReceivedId, error: Error) -> Error {
+        match error {
+            Error::Protocol(
+                wx_ime_protocol::Error::Invalid(_) | wx_ime_protocol::Error::Json(_),
+            ) => self.reject_image(id, "invalid image reference or checksum"),
+            Error::Invalid(
+                "COS download exceeds limit" | "file type or size limit" | "file size limit",
+            ) => self.reject_image(id, "received image exceeds the encoded size limit"),
+            Error::Invalid("empty COS object") => {
+                self.reject_image(id, "received image object is empty")
+            }
+            Error::Invalid("image cache object must be a regular file") => {
+                self.reject_image(id, "cached image is not a regular file")
+            }
+            // Transport, HTTP/authentication, filesystem and crypto-provider
+            // errors remain retryable; they do not establish corrupt content.
+            other => other,
+        }
+    }
 }
 impl Client {
     /// Consumer-driven latest-value polling. One unacknowledged receipt at a time.
@@ -84,12 +117,16 @@ impl Client {
             if let Some(pending) = session.store.state.pending.clone() {
                 if receive.emitted.as_ref() != Some(&pending.id) {
                     if let ClipboardContent::Image(image) = &pending.content {
-                        let bytes =
-                            crate::storage::read_limited(&image.path, MAX_IMAGE_BYTES).await?;
+                        let bytes = read_cached_image(&image.path, MAX_IMAGE_BYTES)
+                            .await
+                            .map_err(|error| receive.image_error(&pending.id, error))?;
                         if bytes.len() != image.bytes || sha256(&bytes) != image.sha256 {
-                            return Err(Error::Invalid("pending image cache integrity"));
+                            return Err(
+                                receive.reject_image(&pending.id, "pending image cache integrity")
+                            );
                         }
                     }
+                    receive.rejected = None;
                     receive.emitted = Some(pending.id.clone());
                     return Ok(Some(Event::ClipboardReceived(pending)));
                 }
@@ -142,9 +179,13 @@ impl Client {
                             .filter(|s| !s.is_empty())
                             .ok_or(Error::Invalid("clipboard trace ID missing"))?,
                     };
-                    let bytes = message
-                        .binary_data
-                        .ok_or(Error::Invalid("clipboard binary payload missing"))?;
+                    let bytes = message.binary_data.ok_or_else(|| {
+                        if message.r#type == Some(clipboard::IMAGE_COS) {
+                            receive.reject_image(&id, "image reference payload is missing")
+                        } else {
+                            Error::Invalid("clipboard binary payload missing")
+                        }
+                    })?;
                     let content = match message.r#type {
                         Some(clipboard::TEXT_INLINE) => {
                             if bytes.len() > clipboard::MAX_TEXT_BYTES {
@@ -167,22 +208,38 @@ impl Client {
                             )
                         }
                         Some(clipboard::IMAGE_COS) => {
-                            let reference = ImageReference::decode(&bytes)?;
-                            let cipher =
-                                self.inner.cos.get(&reference.url, MAX_IMAGE_BYTES).await?;
-                            let plain = reference.decrypt(&cipher)?;
+                            let reference = ImageReference::decode(&bytes)
+                                .map_err(Error::from)
+                                .map_err(|error| receive.image_error(&id, error))?;
+                            let cipher = self
+                                .inner
+                                .cos
+                                .get(&reference.url, MAX_IMAGE_BYTES)
+                                .await
+                                .map_err(|error| receive.image_error(&id, error))?;
+                            let plain = reference
+                                .decrypt(&cipher)
+                                .map_err(Error::from)
+                                .map_err(|error| receive.image_error(&id, error))?;
                             let digest = sha256(&plain);
-                            private_dir(&cache_dir)?;
+                            prepare_image_cache(&cache_dir)?;
                             let path = cache_dir
                                 .join(format!("{}-{}-{}.image", group.id, version, digest));
                             let mut temp = tempfile::NamedTempFile::new_in(&cache_dir)?;
                             temp.write_all(&plain)?;
                             temp.as_file().sync_all()?;
-                            if let Err(error) = temp.persist_noclobber(&path)
-                                && (error.error.kind() != std::io::ErrorKind::AlreadyExists
-                                    || sha256(&fs::read(&path)?) != digest)
-                            {
-                                return Err(Error::Io(error.error));
+                            if let Err(error) = temp.persist_noclobber(&path) {
+                                if error.error.kind() != std::io::ErrorKind::AlreadyExists {
+                                    return Err(Error::Io(error.error));
+                                }
+                                let existing = read_cached_image(&path, MAX_IMAGE_BYTES)
+                                    .await
+                                    .map_err(|error| receive.image_error(&id, error))?;
+                                if sha256(&existing) != digest {
+                                    return Err(
+                                        receive.reject_image(&id, "cached image checksum mismatch")
+                                    );
+                                }
                             }
                             #[cfg(unix)]
                             File::open(&cache_dir)?.sync_all()?;
@@ -206,6 +263,7 @@ impl Client {
                         session.store.state.pending = None;
                         return Err(error);
                     }
+                    receive.rejected = None;
                     receive.emitted = Some(pending.id.clone());
                     return Ok(Some(Event::ClipboardReceived(pending)));
                 }
@@ -213,6 +271,38 @@ impl Client {
             Ok(None)
         }
     }
+    /// Explicitly discard the exact image revision reported by InvalidClipboard.
+    ///
+    /// This is opt-in: polling errors never consume remote content automatically.
+    /// Network/authentication failures are not eligible. A different pending or
+    /// subsequently rejected revision is protected, and a failed save rolls back.
+    pub async fn discard_clipboard(&self, id: ReceivedId) -> Result<()> {
+        let mut receive = self.inner.receive.lock().await;
+        if receive.rejected.as_ref() != Some(&id) {
+            return Err(Error::Invalid(
+                "clipboard revision was not rejected by this receiver",
+            ));
+        }
+        let mut session = self.session().await?;
+        session.store.discard_clipboard(&id)?;
+        receive.rejected = None;
+        if receive.emitted.as_ref() == Some(&id) {
+            receive.emitted = None;
+        }
+        Ok(())
+    }
+
+    /// Reclaim unused SDK image objects, retaining the durable pending receipt.
+    ///
+    /// Coordinates with in-flight downloads before taking the session lock, so
+    /// an image cannot be removed between its cache write and receipt commit.
+    /// Existing acknowledge/open cleanup remains unchanged. Hosts must finish
+    /// using or copy an image before acknowledging it.
+    pub async fn prune_image_cache(&self) -> Result<()> {
+        let _receive = self.inner.receive.lock().await;
+        self.session().await?.store.clean_cache()
+    }
+
     /// Commit the per-group cursor only after the host has committed the receipt.
     pub async fn acknowledge(&self, id: ReceivedId) -> Result<()> {
         let mut session = self.session().await?;

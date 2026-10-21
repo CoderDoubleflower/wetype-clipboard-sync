@@ -38,6 +38,8 @@ jobs:
             wxclipd/target
             vendor/wx-ime-sdk/target
           key: linux-rust-1.92-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            linux-rust-1.92-
       - name: Check formatting
         run: |
           cargo +"$RUST_VERSION" fmt --manifest-path wxclipd/Cargo.toml --check
@@ -81,6 +83,8 @@ jobs:
             wxclipd/target
             vendor/wx-ime-sdk/target
           key: windows-x86-static-rust-1.92-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            windows-x86-static-rust-1.92-
       - name: Test Windows daemon and protocol workspace
         shell: pwsh
         run: |
@@ -139,5 +143,5 @@ jobs:
           fi
           gh release create "$tag" dist/*.exe dist/*.zip dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$tag — Windows x86 + HTTP/SOCKS proxies" \
+            --title "$tag — Windows x86 image clipboard sync + HTTP/SOCKS proxies" \
             --notes-file packaging/windows/RELEASE-NOTES.md

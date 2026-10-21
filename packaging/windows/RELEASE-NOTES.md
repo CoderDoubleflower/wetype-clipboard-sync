@@ -1,31 +1,38 @@
-## Windows x86 与 HTTP/SOCKS 代理
+## v0.3.0 · 双向图片同步与 HTTP/SOCKS 代理
 
-本版为 Windows 10 及以上提供 **32 位 x86** 安装包和便携版，继续支持 Linux。
+本版补齐 Windows / Linux 的图片剪贴板同步，Windows 10 及以上继续提供 **32 位 x86** 安装包和便携版，可在 64 位 Windows 上兼容运行。
 
 ### 下载
 
-- `wetype-clipboard-sync-0.2.0-windows-x86-setup.exe`：当前用户安装，不需要管理员权限。包含配置/配对、启动、停止快捷方式，可选择登录自启。
-- `wetype-clipboard-sync-0.2.0-windows-x86-portable.zip`：解压后运行 `wxclipd.exe setup`。
+- `wetype-clipboard-sync-0.3.0-windows-x86-setup.exe`：当前用户安装，无需管理员权限；含配置/配对、启动、停止快捷方式，可选择登录自启。
+- `wetype-clipboard-sync-0.3.0-windows-x86-portable.zip`：完整解压后运行 `wxclipd.exe setup`。
 - `SHA256SUMS.txt`：上述文件的 SHA-256 校验值。
 
-### 功能
+### 本版新增
 
-- Windows 原生 Unicode 文本剪贴板、后台启动器、日志与当前用户 Named Pipe。
-- HTTP CONNECT、SOCKS5/SOCKS5h，支持用户名密码认证；控制 API、COS 和 WSS 统一使用代理，失败不自动绕过代理。
-- 代理和轮询配置向导，以及 `config`、`start`、`stop` 命令。
-- 本地观察与网络请求解耦；最新待发值重试；先写入后确认远端 receipt；保护网络等待期间的本地新复制。
-- 保留 Linux Wayland/X11 后端与 systemd 安装。
+- **电脑 ↔ 手机图片同步**：读取 Windows 注册 PNG、DIBV5 / DIB 位图；接收 PNG / JPEG 后写入原生剪贴板。Linux 支持 PNG / JPEG MIME 剪贴板。
+- 图片优先于附带的文字地址；保留透明 PNG，识别 JPEG 方向信息；序列号缓存减少重复解码，相同像素不会重复上传。
+- 图片上传/下载沿用 SDK 加密 COS 通道；HTTP CONNECT、SOCKS5、SOCKS5h 与文本共用配置，支持用户名密码认证，失败不绕过代理。
+- 图片接收先校验、解码，再写入，成功后才确认；剪贴板占用会重试。慢下载、慢解码期间继续保护本地新复制，接收的图片不自动回传。
+- 损坏、超限或不支持的远端图片会记录原因并跳过；临时网络/文件错误保留待处理状态，缓存清理保护未确认图片。
 
-### 开始使用
+### 升级与使用
 
-安装后打开 **Setup and Pair**，填写代理地址（无需代理可留空），然后输入手机微信输入法「跨设备粘贴」显示的六位码并在手机确认。设置完成后启动后台同步。
+从 0.2.0 升级时先用 **Stop Sync** 停止旧版，然后运行新安装包覆盖安装；配对身份与代理配置保留。
 
-常见地址：`http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。修改配置后重新启动同步。完整说明随安装包提供，也可阅读仓库中的 [Windows 指南](https://github.com/CoderDoubleflower/wetype-clipboard-sync/blob/main/packaging/windows/README-Windows.md)。
+首次安装打开 **Setup and Pair**，填写代理（可留空直连），输入手机微信输入法「跨设备粘贴」的六位码并在手机确认。常见代理地址：`http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。
 
-### 验证与边界
+电脑端使用截图工具或「复制图片」，等待后在手机支持图片粘贴的应用中验证。反向在手机复制图片，在 Windows 画图或支持图片的聊天窗口粘贴。资源管理器中 Ctrl+C 图片文件是文件对象，本版不处理。详细说明见包内文档及 [Windows 指南](https://github.com/CoderDoubleflower/wetype-clipboard-sync/blob/main/packaging/windows/README-Windows.md)。
 
-发布流程必须通过 Linux/Windows 测试、Windows x86 release 构建、PE32 与动态依赖检查、安装/后台停止/卸载验证才会发布。代理测试使用本地模拟服务。Windows CI 在 x64 系统上运行 x86 程序；本次自动验证未连接用户手机完成真实配对。
+### 大小与行为边界
 
-当前同步纯文本，单次最多 1 MiB；不提供图片/文件同步或剪贴板历史。默认 Windows 远端轮询 10 秒；Ctrl/右键触发不会拦截按键等待网络，因此同一次粘贴不保证立即得到手机最新内容。出站待发值保存在内存；发送结果不确定时需 `sync-now` 或新复制触发重试。
+- 文本最多 1 MiB（UTF-8）；网络图片最多 16 MiB，解码最多 16,777,216 像素（64 MiB RGBA）、每边最多 16,384 像素，服务端动态限制仍然生效。
+- JPEG 尽量保留原编码；位图优先转 PNG。PNG 超限时仅不透明图片尝试 JPEG 质量 95、90 的有损压缩，不缩放尺寸；透明图片超限会报错，不丢弃透明度。
+- 不提供任意文件传输、富文本格式保留、动图播放或剪贴板历史。默认不发送启动前已有剪贴板。
+- Windows 远端轮询默认 10 秒；Ctrl / 右键提前拉取不会拦截按键等待网络。出站待发内容仅在内存保留最新值；发送结果不确定时需 `sync-now` 或复制新内容重试。
 
-安装包未做商业代码签名。软件为非官方兼容实现，协议行为仍可能受官方服务更新影响。
+### 验证情况
+
+发布流程要求 Linux / Windows 测试、Windows 原生图片剪贴板测试、本地 TLS + HTTP/SOCKS 加密图片往返、x86 release 构建、PE32 与动态依赖检查，以及实际安装/后台停止/卸载验证通过后才发布。
+
+Windows CI 在 x64 系统运行 x86 程序。本次自动验证未连接真实手机账号，手机端互通仍需在你的已配对设备上验证。安装包未做商业代码签名；本项目为非官方实现，兼容性可能受官方协议更新影响。

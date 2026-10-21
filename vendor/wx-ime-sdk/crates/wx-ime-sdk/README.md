@@ -32,13 +32,20 @@ async fn join_peer(state: std::path::PathBuf, code: &str) -> Result<Client> {
 ## 剪贴板
 
 - `send_text`：最大 1 MiB UTF-8；256 KiB 及以下内联，更大的通过 COS。
-- `send_image`：已编码的图片文件，最大 16 MiB，上传前加密。
+- `send_image(path)` / `send_image_bytes(&[u8])`：发送已编码图片，最大 16 MiB；
+  内存接口不需要临时文件。SDK 不转码，上传前加密，并遵守服务端返回的 COS 大小上限。
 - `SendReceipt` 只证明服务端接受。`OutcomeUnknown` 表示最终结果不确定，SDK 不会自动重发。
 - `poll_clipboard_once` 拉取一次最新值，没有则返回 `None`；`next_event` 持续轮询直到出现
   `GroupChanged` 或 `ClipboardReceived`。两者都只是“最新值”轮询，不是历史队列。同一时间只有
   一个未确认回执，重启后仍会保留。
 - 宿主把内容提交成功后，才调用 `acknowledge(receipt.id)`。图片路径属于 SDK 缓存，确认后会被
   回收，需要先复制走。
+- `InvalidClipboard { id, reason }` 表示某个图片版本的引用、校验或大小确定无效；宿主可显式调用
+  `discard_clipboard(id)` 拒收这个准确版本，继续接收后续内容。网络、代理认证、超时和临时文件
+  读写失败不会被当作坏图片跳过；保存游标失败时可用相同 ID 重试，较新的待确认回执受保护。
+- `prune_image_cache()` 可显式回收 SDK 自有命名的闲置图片缓存，始终保留待确认图片，并与
+  下载/回执提交互斥。打开身份和成功确认回执时仍会自动清理；清理不跟随符号链接或 Windows
+  reparse point，也不会删除其他文件。清理失败不会撤销已经持久化的确认。
 
 ## 文件
 

@@ -6,7 +6,7 @@
 
 mod state;
 
-use crate::clipboard::{self, Backend};
+use crate::clipboard::{self, Backend, Payload};
 use anyhow::{anyhow, Context, Result};
 use state::{PublishFailure, ReceiptPhase, Retry, State};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use wx_ime_sdk::{
-    Client, ClipboardContent, NotifyEvent, PairingCode, ReceivedClipboard, ReceivedId, SendReceipt,
+    Client, DownloadedImage, NotifyEvent, PairingCode, ReceivedClipboard, ReceivedId, SendReceipt,
 };
 
 pub struct SyncOptions {
@@ -29,25 +29,49 @@ pub struct SyncOptions {
 }
 
 enum NetworkCommand {
-    Send { generation: u64, text: String },
-    Poll { generation: u64 },
+    Send {
+        generation: u64,
+        payload: Payload,
+    },
+    Poll {
+        generation: u64,
+    },
+    PrepareImage {
+        id: ReceivedId,
+        image: DownloadedImage,
+    },
     Acknowledge(ReceivedId),
+    Discard(ReceivedId),
 }
 
 enum NetworkResult {
     Sent {
         generation: u64,
-        characters: usize,
+        description: String,
         result: wx_ime_sdk::Result<SendReceipt>,
     },
     Polled {
         generation: u64,
         result: wx_ime_sdk::Result<Option<ReceivedClipboard>>,
     },
+    Prepared {
+        id: ReceivedId,
+        result: std::result::Result<Payload, PrepareFailure>,
+    },
     Acknowledged {
         id: ReceivedId,
         result: wx_ime_sdk::Result<()>,
     },
+    Discarded {
+        id: ReceivedId,
+        result: wx_ime_sdk::Result<()>,
+    },
+}
+
+#[derive(Debug)]
+enum PrepareFailure {
+    Retry(anyhow::Error),
+    Invalid(anyhow::Error),
 }
 
 pub async fn run(
@@ -137,11 +161,11 @@ pub async fn run(
                 };
                 in_flight = false;
                 match result {
-                    NetworkResult::Sent { generation, characters, result } => match result {
+                    NetworkResult::Sent { generation, description, result } => match result {
                         Ok(receipt) => {
                             state.sent(generation, receipt.group, receipt.version);
                             poll_requested = true;
-                            println!("[wxclipd] 已发送 {characters} 字符（group {} version {}）", receipt.group, receipt.version);
+                            println!("[wxclipd] 已发送{description}（group {} version {}）", receipt.group, receipt.version);
                         }
                         Err(error) => {
                             let failure = publish_failure(&error);
@@ -159,18 +183,37 @@ pub async fn run(
                     NetworkResult::Polled { generation, result } => match result {
                         Ok(Some(received)) => {
                             poll_retry.reset(Instant::now());
-                            if let ClipboardContent::Image(image) = &received.content {
-                                println!("[wxclipd] 收到图片 {} 字节，当前版本仅同步文本，已跳过", image.bytes);
-                            }
                             if state.received(received, generation, Instant::now()) {
                                 println!("[wxclipd] 本机已有更新的复制内容，已丢弃过时的远端值");
                             }
                         }
                         Ok(None) => poll_retry.reset(Instant::now()),
+                        Err(wx_ime_sdk::Error::InvalidClipboard { id, reason }) => {
+                            poll_retry.reset(Instant::now());
+                            eprintln!("[wxclipd] 远端图片无效或超过限制（{reason}），将拒收此版本后继续同步");
+                            state.received_invalid(id, Instant::now());
+                        }
                         Err(error) => {
                             poll_retry.failed(Instant::now());
                             poll_requested = true;
                             eprintln!("[wxclipd] 拉取失败（第 {} 次，将退避重试）: {error}", poll_retry.failures);
+                        }
+                    },
+                    NetworkResult::Prepared { id, result } => match result {
+                        Ok(payload) => {
+                            // A newer local copy may have deliberately ended
+                            // this receipt while the image was being decoded.
+                            state.prepared(&id, payload, Instant::now());
+                        }
+                        Err(PrepareFailure::Retry(error)) => {
+                            if state.preparation_failed(&id, Instant::now()) {
+                                eprintln!("[wxclipd] 暂时无法准备已下载的图片，保留消息稍后重试: {error:#}");
+                            }
+                        }
+                        Err(PrepareFailure::Invalid(error)) => {
+                            if state.invalid_image(&id, Instant::now()) {
+                                eprintln!("[wxclipd] 远端图片损坏、格式不支持或超过限制，已跳过此版本: {error:#}");
+                            }
                         }
                     },
                     NetworkResult::Acknowledged { id, result } => match result {
@@ -181,6 +224,16 @@ pub async fn run(
                         Err(error) => {
                             state.incoming_failed(Instant::now());
                             eprintln!("[wxclipd] 保存接收确认失败，将重试；不会重复写入剪贴板: {error}");
+                        }
+                    },
+                    NetworkResult::Discarded { id, result } => match result {
+                        Ok(()) => {
+                            state.discarded(&id);
+                            poll_requested = true;
+                        }
+                        Err(error) => {
+                            state.discard_failed(&id, Instant::now());
+                            eprintln!("[wxclipd] 保存无效图片的拒收记录失败，将重试同一版本: {error}");
                         }
                     },
                 }
@@ -210,7 +263,10 @@ pub async fn run(
         if in_flight || state.observed.is_none() {
             continue;
         }
-        if state.incoming.is_none() && state.outgoing_due(Instant::now()).is_some() {
+        if state.incoming.is_none()
+            && state.invalid.is_none()
+            && state.outgoing_due(Instant::now()).is_some()
+        {
             // A retry may be due between local timer ticks, or after a long
             // clipboard read failure. Never resend an obsolete observation
             // without first checking what the user currently has copied.
@@ -219,14 +275,23 @@ pub async fn run(
             }
         }
         let now = Instant::now();
-        let command = if state.incoming.is_some() {
+        let command = if state.invalid.is_some() {
+            state.discard_due(now).map(NetworkCommand::Discard)
+        } else if state.incoming.is_some() {
             // Finish or deliberately discard the SDK's durable receipt before
             // asking for another one. Acknowledgement errors never lose it.
-            state.ack_due(now).map(NetworkCommand::Acknowledge)
+            if let Some((id, image)) = state.prepare_due(now) {
+                Some(NetworkCommand::PrepareImage { id, image })
+            } else {
+                state.ack_due(now).map(NetworkCommand::Acknowledge)
+            }
         } else if state.outgoing.is_some() {
             state
                 .outgoing_due(now)
-                .map(|(generation, text)| NetworkCommand::Send { generation, text })
+                .map(|(generation, payload)| NetworkCommand::Send {
+                    generation,
+                    payload,
+                })
         } else if poll_requested && poll_retry.at <= now {
             poll_requested = false;
             Some(NetworkCommand::Poll {
@@ -262,14 +327,14 @@ pub async fn run(
 }
 
 async fn observe_clipboard(backend: Backend, state: &mut State, read_failed: &mut bool) -> bool {
-    match clipboard::read_text(backend).await {
-        Ok(text) => {
+    match clipboard::read_snapshot(backend).await {
+        Ok(snapshot) => {
             *read_failed = false;
             let applying = state
                 .incoming
                 .as_ref()
-                .is_some_and(|pending| pending.phase == ReceiptPhase::Apply);
-            if state.observe(text, Instant::now()) && applying {
+                .is_some_and(|pending| pending.phase != ReceiptPhase::Acknowledge);
+            if state.observe(snapshot, Instant::now()) && applying {
                 println!("[wxclipd] 已保留新复制的本机内容，结束旧远端消息的应用");
             }
             true
@@ -298,25 +363,26 @@ async fn apply_incoming(backend: Backend, state: &mut State, read_failed: &mut b
         .incoming
         .as_ref()
         .expect("apply_due requires a receipt");
-    let ClipboardContent::Text(text) = &pending.message.content else {
-        return;
-    };
-    let text = text.clone();
+    let payload = pending
+        .payload
+        .as_ref()
+        .expect("apply requires prepared content")
+        .clone();
     let source = pending.message.source.name.clone();
     let expected = state
         .observed
         .as_ref()
         .expect("clipboard was observed")
         .clone();
-    match clipboard::write_text_if_unchanged(backend, &expected, &text).await {
-        Ok(true) => {
-            state.applied(Instant::now());
+    match clipboard::write_if_unchanged(backend, &expected, &payload).await {
+        Ok(Some(written)) => {
+            state.applied(written, Instant::now());
             println!(
-                "[wxclipd] 已接收来自 {source} 的文本（{} 字符）",
-                text.chars().count()
+                "[wxclipd] 已接收来自 {source} 的{}",
+                describe_payload(&payload)
             );
         }
-        Ok(false) => {
+        Ok(None) => {
             state.discard_incoming(Instant::now());
             observe_clipboard(backend, state, read_failed).await;
             println!("[wxclipd] 写入前发现本机剪贴板已更新，已保留本机内容");
@@ -325,6 +391,48 @@ async fn apply_incoming(backend: Backend, state: &mut State, read_failed: &mut b
             state.incoming_failed(Instant::now());
             eprintln!("[wxclipd] 写入剪贴板失败，保留消息稍后重试: {error:#}");
         }
+    }
+}
+
+fn describe_payload(payload: &Payload) -> String {
+    match payload {
+        Payload::Text(text) => format!("文本（{} 字符）", text.chars().count()),
+        Payload::Image(image) => format!(
+            "图片（{}×{}，{} 字节）",
+            image.width(),
+            image.height(),
+            image.encoded().len()
+        ),
+    }
+}
+
+/// File reads and image decoding must not block the local observation loop.
+/// Only definite invalid data is consumed; a temporary file/worker failure
+/// keeps the already-emitted SDK receipt so preparation can be retried.
+async fn prepare_image(image: DownloadedImage) -> std::result::Result<Payload, PrepareFailure> {
+    match tokio::task::spawn_blocking(move || crate::image::ClipboardImage::from_downloaded(&image))
+        .await
+    {
+        Ok(Ok(image)) => Ok(Payload::Image(Arc::new(image))),
+        Ok(Err(error))
+            if error
+                .chain()
+                .any(|cause| cause.is::<std::collections::TryReserveError>()) =>
+        {
+            Err(PrepareFailure::Retry(error))
+        }
+        // Decoding from a bounded in-memory buffer can itself return an IO
+        // UnexpectedEof. That is malformed content, not a transient cache read.
+        Ok(Err(error)) if error.chain().any(|cause| cause.is::<::image::ImageError>()) => {
+            Err(PrepareFailure::Invalid(error))
+        }
+        Ok(Err(error)) if error.chain().any(|cause| cause.is::<std::io::Error>()) => {
+            Err(PrepareFailure::Retry(error))
+        }
+        Ok(Err(error)) => Err(PrepareFailure::Invalid(error)),
+        Err(error) => Err(PrepareFailure::Retry(
+            anyhow!(error).context("图片解码任务退出"),
+        )),
     }
 }
 
@@ -359,13 +467,20 @@ async fn network_worker(
     let mut failures = 0u32;
     while let Some(command) = commands.recv().await {
         let (result, failed) = match command {
-            NetworkCommand::Send { generation, text } => {
-                let result = client.send_text(&text).await;
+            NetworkCommand::Send {
+                generation,
+                payload,
+            } => {
+                let description = describe_payload(&payload);
+                let result = match &payload {
+                    Payload::Text(text) => client.send_text(text).await,
+                    Payload::Image(image) => client.send_image_bytes(image.encoded()).await,
+                };
                 let failed = result.as_ref().err().is_some_and(transient_network_error);
                 (
                     NetworkResult::Sent {
                         generation,
-                        characters: text.chars().count(),
+                        description,
                         result,
                     },
                     failed,
@@ -376,9 +491,17 @@ async fn network_worker(
                 let failed = result.as_ref().err().is_some_and(transient_network_error);
                 (NetworkResult::Polled { generation, result }, failed)
             }
+            NetworkCommand::PrepareImage { id, image } => {
+                let result = prepare_image(image).await;
+                (NetworkResult::Prepared { id, result }, false)
+            }
             NetworkCommand::Acknowledge(id) => {
                 let result = client.acknowledge(id.clone()).await;
                 (NetworkResult::Acknowledged { id, result }, false)
+            }
+            NetworkCommand::Discard(id) => {
+                let result = client.discard_clipboard(id.clone()).await;
+                (NetworkResult::Discarded { id, result }, false)
             }
         };
         failures = if failed {
@@ -586,5 +709,128 @@ async fn control_pair(client: &Client, code: &str) -> String {
             format!("{payload}\n")
         }
         Err(error) => format!("err 配对失败: {error}\n"),
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::clipboard::Snapshot;
+    use sha2::{Digest, Sha256};
+
+    fn receipt(content: serde_json::Value, version: u64) -> ReceivedClipboard {
+        serde_json::from_value(serde_json::json!({
+            "id": { "group": 10, "version": version, "from_uin": 2, "trace_id": format!("image-test-{version}") },
+            "source": { "uin": 2, "name": "phone", "platform": 1, "supports_file_transfer": false },
+            "content": content,
+            "expire_at": 4_000_000_000u64
+        })).unwrap()
+    }
+
+    fn downloaded(path: PathBuf, bytes: &[u8]) -> DownloadedImage {
+        DownloadedImage {
+            path,
+            bytes: bytes.len(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_verifies_and_decodes_a_real_download_without_a_clipboard() {
+        let directory = tempfile::tempdir().unwrap();
+        let original =
+            crate::image::ClipboardImage::from_rgba(1, 1, vec![12, 34, 56, 255]).unwrap();
+        let image = downloaded(directory.path().join("image"), original.encoded());
+        std::fs::write(&image.path, original.encoded()).unwrap();
+        let prepared = prepare_image(image).await.unwrap();
+        assert_eq!(prepared, Payload::Image(Arc::new(original)));
+    }
+
+    #[tokio::test]
+    async fn a_missing_cache_file_remains_retryable_until_the_file_is_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = crate::image::ClipboardImage::from_rgba(1, 1, vec![1, 2, 3, 255]).unwrap();
+        let image = downloaded(directory.path().join("image"), original.encoded());
+        assert!(matches!(
+            prepare_image(image.clone()).await,
+            Err(PrepareFailure::Retry(_))
+        ));
+        std::fs::write(&image.path, original.encoded()).unwrap();
+        assert!(matches!(prepare_image(image).await, Ok(Payload::Image(_))));
+    }
+
+    #[tokio::test]
+    async fn truncated_png_is_consumed_and_does_not_block_the_next_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let image = downloaded(directory.path().join("truncated"), bytes);
+        std::fs::write(&image.path, bytes).unwrap();
+        let now = Instant::now();
+        let mut state = State::new(false);
+        state.observe(
+            Snapshot {
+                content: None,
+                revision: None,
+            },
+            now,
+        );
+        state.received(
+            receipt(serde_json::json!({ "Image": image }), 20),
+            state.generation,
+            now,
+        );
+        let (id, pending) = state.prepare_due(now).unwrap();
+        let result = prepare_image(pending).await;
+        assert!(
+            matches!(result, Err(PrepareFailure::Invalid(_))),
+            "{result:?}"
+        );
+        assert!(state.invalid_image(&id, now));
+        assert!(!state.apply_due(now));
+        assert_eq!(state.ack_due(now), Some(id.clone()));
+        state.acknowledged(&id);
+        state.received(
+            receipt(serde_json::json!({ "Text": "after invalid image" }), 21),
+            state.generation,
+            now,
+        );
+        assert!(state.apply_due(now));
+    }
+
+    #[tokio::test]
+    async fn oversized_image_is_consumed_before_opening_or_allocating_its_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = DownloadedImage {
+            path: directory.path().join("not-created"),
+            bytes: crate::image::MAX_ENCODED_BYTES + 1,
+            sha256: String::new(),
+        };
+        let now = Instant::now();
+        let mut state = State::new(false);
+        state.observe(
+            Snapshot {
+                content: None,
+                revision: None,
+            },
+            now,
+        );
+        state.received(
+            receipt(serde_json::json!({ "Image": image }), 20),
+            state.generation,
+            now,
+        );
+        let (id, pending) = state.prepare_due(now).unwrap();
+        assert!(matches!(
+            prepare_image(pending).await,
+            Err(PrepareFailure::Invalid(_))
+        ));
+        assert!(state.invalid_image(&id, now));
+        state.acknowledged(&state.ack_due(now).unwrap());
+        state.received(
+            receipt(serde_json::json!({ "Text": "after oversized image" }), 21),
+            state.generation,
+            now,
+        );
+        assert!(state.apply_due(now));
     }
 }

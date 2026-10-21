@@ -31,7 +31,7 @@ $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-stati
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.2.0
+./packaging/windows/build-package.ps1 -Version 0.3.0
 ```
 
 Windows 的应用与 SDK 测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。Linux 仍额外验证独立 SDK workspace。
@@ -53,6 +53,7 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 | `wxclipd/src/background.rs` | Windows 无控制台启动器、日志重定向 |
 | `wxclipd/src/config.rs` | 配置验证与原子保存 |
 | `wxclipd/src/clipboard/` | Win32 剪贴板和 Wayland/X11 后端 |
+| `wxclipd/src/image.rs` | 有界图片解码、PNG/JPEG 编码、像素指纹与接收缓存校验 |
 | `wxclipd/src/input_watch/` | Windows 输入 hooks、Linux evdev 触发 |
 | `wxclipd/src/ipc/` | Windows Named Pipe、Linux Unix socket |
 | `wxclipd/src/sync.rs` | 本地观察、网络 worker、控制命令 |
@@ -65,7 +66,7 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 
 `config.json` 保存 `proxy`、`poll_interval_seconds` 和 `paste_trigger`。代理优先级是命令行、`WXCLIPD_PROXY`、配置文件、直连。环境变量为空表示显式直连；系统 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 不改变应用路由。
 
-HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码认证。`socks5://` 本地解析目标域名，`socks5h://` 把目标域名交给代理。控制 API、COS 文本下载/上传和通知 WSS 使用同一配置，不在代理失败时回退直连。当前应用只同步文本；SDK 中应用未使用的文件传输通道没有扩展代理能力。
+HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码认证。`socks5://` 本地解析目标域名，`socks5h://` 把目标域名交给代理。控制 API、COS 图片/文本下载上传和通知 WSS 使用同一配置，不在代理失败时回退直连。图片沿用 SDK 的加密 COS 通道，不需要局域网文件通道；SDK 中应用未使用的文件传输通道没有扩展代理能力。
 
 不要在错误或日志中输出原始代理 URL。认证信息留在受当前用户访问权限保护的配置文件中，并通过子进程环境传递最终代理设置，避免放进后台进程参数。
 
@@ -92,15 +93,19 @@ Windows 状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒�
 
 本地默认每 400 ms 观察一次，独立于网络请求。远端默认 Windows 10 秒、Linux 90 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
 
-出站只保留最新待发文本，不是历史队列。明确网络失败会退避重试；发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新复制恢复发送。出站队列不跨进程重启持久化。
+出站只保留最新待发文本或图片，不是历史队列。明确网络失败会退避重试；发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新内容恢复发送；同一内容仅序列号变化不会解除暂停。出站队列不跨进程重启持久化。
 
-入站持有完整 receipt。写剪贴板成功后才确认；确认失败只重试确认，不重复覆盖。Windows 在同一次剪贴板锁内比较旧值和写入新值，保护刚发生的本地复制。Linux 外部剪贴板命令只能做最后一次重新读取检查，不能提供同样的原子保证。
+入站持有完整 receipt，图片先在 blocking worker 中检查缓存长度/哈希并解码，再应用到剪贴板。写入成功后才确认；确认失败只重试确认，不重复覆盖。Windows 在同一次剪贴板锁内比较序列号和写入新值，保护刚发生的本地复制，包括重新复制同一内容。Linux 外部剪贴板命令只能做最后一次重新读取检查，不能提供同样的原子保证。
 
 本地输入监听代码只用 Ctrl/鼠标右键触发拉取。Linux 的 `60-wxclipd-input.rules` 需早于 systemd 的 `73-seat-late.rules` 生效，以便 `uaccess` 授予活跃会话权限。
 
+图片快照通过 `Arc` 共享，比较尺寸及 RGBA 的 SHA-256；Windows 按剪贴板序列号缓存解码结果。识别顺序为 PNG、DIBV5、DIB、文本。网络图片上限 16 MiB，解码像素上限 64 MiB RGBA、每边 16384；decoder 另有分配限制。保留 JPEG 编码，位图默认 PNG，超限时仅不透明图片可降为 JPEG 95/90。有限长度 writer 必须检查编码器返回值和 writer 的溢出、分配失败状态：PNG 的最终 IEND 写入可发生在 Drop 中。
+
+确定无效的图片不阻塞后续内容：完整 receipt 的解码错误进入确认阶段；SDK 在 receipt 创建前发现坏引用、超限或完整性错误时返回 `InvalidClipboard`，应用使用精确 ID 的 `discard_clipboard`。临时网络、文件 I/O 和可识别的分配错误保留并重试；游标持久化失败恢复旧状态。缓存清理保留待确认图片，过滤符号链接和 Windows reparse point。
+
 ## 测试与发布
 
-`.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上构建并测试 Linux/Windows。Windows 测试包含真实剪贴板和本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时和 WSS 握手，不依赖用户手机号或配对状态。
+`.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上构建并测试 Linux/Windows。Windows 测试包含真实文本/图片剪贴板、透明度、占用与序列冲突、本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时、WSS 握手，以及受信本地 TLS 下的加密 COS 图片 PUT/GET 逐字节往返，不依赖用户手机号或配对状态。
 
 main 的 Linux 与 Windows 任务都通过后，以 `wxclipd/Cargo.toml` 的版本创建 GitHub Release，上传安装器、便携 ZIP 和 SHA256SUMS。已存在的版本不覆盖；后续发布请递增版本并更新 `RELEASE-NOTES.md`。
 
@@ -112,7 +117,7 @@ cargo fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
 git diff --check
 ```
 
-代码测试和安装测试不能代替真实手机验收。验收时配对官方 App，分别测试两端复制中文/emoji/多行文本、超过 256 KiB 的 COS 文本路径、代理断开与恢复、锁屏/睡眠恢复和重新登录自启。
+代码测试和安装测试不能代替真实手机验收。验收时配对官方 App，分别测试两端复制中文/emoji/多行文本、超过 256 KiB 的 COS 文本路径、截图、透明 PNG、JPEG、文本/图片交替、代理断开与恢复、图片下载时再次复制、锁屏/睡眠恢复和重新登录自启。确认接收图片没有自动回传，并在支持图片粘贴的应用中检查方向和透明度。
 
 ## 协议与 APK 分析
 

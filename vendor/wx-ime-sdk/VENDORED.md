@@ -29,8 +29,24 @@
     validation, redacted diagnostics and no direct fallback on proxy failure.
     `Cargo.toml` enables reqwest's `socks` feature and adds the tunnel dependencies;
     loopback tests cover routing, authentication, DNS and failure handling.
+  - `crates/wx-ime-sdk/src/clipboard/send.rs`: add
+    `Client::send_image_bytes(&[u8])`; the existing path API delegates to it,
+    retaining the non-empty/16 MiB and server-advertised COS limits.
+  - `crates/wx-ime-sdk/src/clipboard/receive.rs` + `storage.rs` + `error.rs`:
+    `InvalidClipboard { id, reason }` identifies deterministically invalid image
+    data; explicit `discard_clipboard(id)` advances only that rejected revision,
+    protects other pending receipts and rolls back a failed state save.
+    Transport/authentication failures are never classified as invalid content.
+    `prune_image_cache()` serializes with downloads/receipt commits. Existing
+    acknowledge/open cleanup is preserved and now rejects symbolic links,
+    Windows reparse points and malformed pending paths before deleting objects.
+  - Image tests use loopback HTTP CONNECT/SOCKS5/SOCKS5h proxies and a local TLS
+    CA to verify encrypted binary COS uploads/downloads byte for byte, including
+    authentication, local/remote DNS, receive limits and no direct fallback.
+    Persistence tests cover pending-file retention, exact-version rejection,
+    rollback after failed saves, and cleanup during receipt creation.
 
 This tree is the protocol layer (`crates/wx-ime-protocol`) and async client
 (`crates/wx-ime-sdk`) for the WeType (微信输入法) cross-device clipboard. The
-`wxclipd/` crate in this repository adds the Linux desktop integration that the
+`wxclipd/` crate in this repository adds the Windows/Linux desktop integration that the
 upstream SDK deliberately leaves out.

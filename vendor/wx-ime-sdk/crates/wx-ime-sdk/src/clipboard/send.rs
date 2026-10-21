@@ -123,6 +123,14 @@ impl Client {
     pub async fn send_image(&self, path: impl AsRef<Path>) -> Result<SendReceipt> {
         let path = path.as_ref();
         let bytes = crate::storage::read_limited(path, MAX_IMAGE_BYTES).await?;
+        self.send_image_bytes(&bytes).await
+    }
+    /// Send an already encoded image from memory, without an intermediate file.
+    ///
+    /// The caller owns format validation/transcoding. The encoded image must be
+    /// non-empty and at most 16 MiB; the service may advertise a smaller COS limit.
+    /// Acceptance does not prove that a peer has committed its host clipboard.
+    pub async fn send_image_bytes(&self, bytes: &[u8]) -> Result<SendReceipt> {
         if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
             return Err(Error::Invalid("image empty or exceeds client limit"));
         }
@@ -130,8 +138,8 @@ impl Client {
         let mut key = [0; 16];
         openssl::rand::rand_bytes(&mut key).map_err(wx_ime_protocol::Error::from)?;
         let key = ImageKey::new(key);
-        let url = self.upload(group, key.apply(&bytes)?).await?;
-        let reference = ImageReference::new(&bytes, url, key)?;
+        let url = self.upload(group, key.apply(bytes)?).await?;
+        let reference = ImageReference::new(bytes, url, key)?;
         self.publish(group, clipboard::IMAGE_COS, reference.encode()?)
             .await
     }

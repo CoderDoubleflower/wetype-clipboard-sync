@@ -10,7 +10,7 @@
 | 固定版本 | `1ec70393cc9524c6c341cf768f090b0176586f72` |
 | 位置 | `vendor/wx-ime-sdk/` |
 | 许可 | Apache-2.0，全文见 `vendor/wx-ime-sdk/LICENSE` |
-| 本地改动 | HTTP/SOCKS 代理、通知连接与网络测试，见 `vendor/wx-ime-sdk/VENDORED.md` |
+| 本地改动 | HTTP/SOCKS 代理、图片字节发送、接收确认与缓存处理、网络测试，见 `vendor/wx-ime-sdk/VENDORED.md` |
 
 Apache-2.0 是宽松许可，没有传染性：本仓库的原创代码（`wxclipd/`、`packaging/`、`docs/` 等）
 按 MIT 发布，`vendor/` 下的代码仍按其 Apache-2.0 条款分发。分发本仓库时请一并保留
@@ -24,6 +24,7 @@ Windows 发布包静态链接 OpenSSL（Apache-2.0）以及 Cargo.lock 中锁定
 `licenses/` 目录中的第三方许可文件。OpenSSL 用于兼容原协议的椭圆曲线运算，TLS
 连接由 Rustls 实现。Windows 剪贴板使用 arboard（MIT/Apache-2.0），系统 API
 绑定使用 windows-sys（MIT/Apache-2.0），SOCKS 连接使用 tokio-socks（MIT）。
+图片编解码使用 image（MIT/Apache-2.0）及其 PNG/JPEG 依赖，像素指纹使用 sha2（MIT/Apache-2.0）。
 
 安装包和便携包均保留项目 LICENSE、THIRD_PARTY.md、协议 SDK 许可和构建时取得的
 依赖许可。修改或重新分发时请保留这些文件。

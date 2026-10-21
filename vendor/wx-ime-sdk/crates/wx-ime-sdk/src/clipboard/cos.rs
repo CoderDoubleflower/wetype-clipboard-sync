@@ -78,3 +78,6 @@ impl Cos {
         Ok(bytes)
     }
 }
+
+#[cfg(test)]
+mod tests;

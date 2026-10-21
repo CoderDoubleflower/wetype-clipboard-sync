@@ -33,6 +33,9 @@ pub(crate) fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -59,6 +62,77 @@ pub(crate) async fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
         return Err(Error::Invalid("file size limit"));
     }
     Ok(bytes)
+}
+
+fn is_link(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Also reject junctions and other reparse points, not just symbolic links.
+        return metadata.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn verify_cache_directory(cache: &Path) -> Result<bool> {
+    match fs::symlink_metadata(cache) {
+        Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => Ok(true),
+        Ok(_) => Err(Error::Invalid("image cache must be a regular directory")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+pub(crate) fn prepare_image_cache(cache: &Path) -> Result<()> {
+    if !verify_cache_directory(cache)? {
+        private_dir(cache)?;
+        verify_cache_directory(cache)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_cached_image(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let cache = path.parent().ok_or(Error::Invalid("image cache path"))?;
+    if !verify_cache_directory(cache)? {
+        return Err(Error::Io(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || is_link(&metadata) {
+        return Err(Error::Invalid("image cache object must be a regular file"));
+    }
+    read_limited(path, limit).await
+}
+
+fn owned_image_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(stem) = name.strip_suffix(".image") else {
+        return false;
+    };
+    let mut parts = stem.split('-');
+    let valid_number = |value: Option<&str>| {
+        value.is_some_and(|value| {
+            value
+                .parse::<u64>()
+                .is_ok_and(|number| number != 0 && number.to_string() == value)
+        })
+    };
+    valid_number(parts.next())
+        && valid_number(parts.next())
+        && parts.next().is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        && parts.next().is_none()
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct State {
@@ -229,8 +303,10 @@ impl Store {
     }
     /// Reclaim only SDK-named cache objects; never touch a pending receipt.
     pub fn clean_cache(&self) -> Result<()> {
+        // Fail closed before deleting anything if receipt metadata is corrupted.
+        self.validate_pending()?;
         let cache = self.directory.join("cache");
-        if !cache.exists() {
+        if !verify_cache_directory(&cache)? {
             return Ok(());
         }
         let retained = self.state.pending.as_ref().and_then(|p| {
@@ -242,24 +318,51 @@ impl Store {
         });
         for entry in fs::read_dir(cache)? {
             let entry = entry?;
-            if retained == Some(&entry.path()) || !entry.file_type()?.is_file() {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if retained == Some(&path) || !metadata.is_file() || is_link(&metadata) {
                 continue;
             }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let Some(stem) = name.strip_suffix(".image") else {
-                continue;
-            };
-            let parts: Vec<_> = stem.split('-').collect();
-            if parts.len() == 3
-                && parts[0].parse::<u64>().is_ok()
-                && parts[1].parse::<u64>().is_ok()
-                && parts[2].len() == 64
-                && parts[2].bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                fs::remove_file(entry.path())?;
+            if owned_image_name(&entry.file_name()) {
+                fs::remove_file(path)?;
             }
         }
+        Ok(())
+    }
+
+    /// Commit an explicitly rejected revision without losing a newer receipt or
+    /// moving a cursor backward. Caller serializes this with the receive worker.
+    pub fn discard_clipboard(&mut self, id: &crate::ReceivedId) -> Result<()> {
+        if id.group == 0 || id.version == 0 || id.from_uin == 0 {
+            return Err(Error::Invalid("invalid rejected clipboard identity"));
+        }
+        if self
+            .state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.id != *id)
+        {
+            return Err(Error::Invalid("another clipboard receipt is pending"));
+        }
+        let pending = self.state.pending.take();
+        let previous = self.state.consumed.get(&id.group).copied();
+        self.state
+            .consumed
+            .insert(id.group, previous.unwrap_or(0).max(id.version));
+        if let Err(error) = self.save() {
+            match previous {
+                Some(version) => {
+                    self.state.consumed.insert(id.group, version);
+                }
+                None => {
+                    self.state.consumed.remove(&id.group);
+                }
+            }
+            self.state.pending = pending;
+            return Err(error);
+        }
+        // As with acknowledge(), a cleanup failure cannot undo a durable cursor.
+        let _ = self.clean_cache();
         Ok(())
     }
 }

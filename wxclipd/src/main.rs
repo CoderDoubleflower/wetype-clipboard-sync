@@ -3,6 +3,7 @@
 
 mod clipboard;
 mod config;
+mod image;
 mod input_watch;
 mod ipc;
 mod sync;

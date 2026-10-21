@@ -16,6 +16,13 @@ pub enum Error {
     State(#[from] serde_json::Error),
     #[error("invalid argument: {0}")]
     Invalid(&'static str),
+    /// A particular received image is deterministically invalid. The host may
+    /// explicitly discard this exact revision; no cursor is changed on error.
+    #[error("invalid received image: {reason}")]
+    InvalidClipboard {
+        id: crate::ReceivedId,
+        reason: &'static str,
+    },
     #[error("control transport failed")]
     Transport,
     #[error("proxy operation failed: {0}")]

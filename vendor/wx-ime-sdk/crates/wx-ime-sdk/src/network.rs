@@ -186,6 +186,17 @@ pub(crate) fn http_client(
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
 ) -> Result<reqwest::Client> {
+    http_client_builder(proxy, timeout)?
+        .build()
+        .map_err(|_| Error::Transport)
+}
+
+// Kept as one builder so loopback HTTPS tests can add their own trust anchor
+// without bypassing the production proxy, redirect or timeout policy.
+pub(crate) fn http_client_builder(
+    proxy: Option<&ProxyConfig>,
+    timeout: Duration,
+) -> Result<reqwest::ClientBuilder> {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -194,7 +205,7 @@ pub(crate) fn http_client(
     if let Some(proxy) = proxy {
         builder = builder.proxy(proxy.reqwest_proxy()?);
     }
-    builder.build().map_err(|_| Error::Transport)
+    Ok(builder)
 }
 
 pub(crate) async fn connect_websocket(

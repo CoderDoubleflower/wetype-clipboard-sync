@@ -36,6 +36,19 @@ pub(crate) struct Session {
     capture: Option<Capture>,
 }
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn offline_for_test(store: Store) -> Result<Self> {
+        Ok(Self {
+            identity: IdentityKey::from_pem(store.state.private_pem.as_bytes())?,
+            store,
+            http: network::http_client(None, Duration::from_secs(1))?,
+            key: None,
+            offset: 0,
+            task: 1,
+            capture: None,
+        })
+    }
+
     pub async fn open(
         store: Store,
         capture: Option<PathBuf>,
