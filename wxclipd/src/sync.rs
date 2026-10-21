@@ -163,13 +163,17 @@ pub async fn run(
                             runtime_status.network_failed(&error);
                             let failure = publish_failure(&error);
                             let current = state.outgoing.as_ref().is_some_and(|pending| pending.generation == generation);
-                            state.send_failed(generation, failure, Instant::now());
+                            let failed_at = Instant::now();
+                            state.send_failed(generation, failure, failed_at);
                             if current && failure == PublishFailure::OutcomeUnknown {
                                 eprintln!("[wxclipd] 发送结果不确定，服务端可能已接收；已暂停自动重发。运行 wxclipd sync-now 可重试当前内容，或复制新内容继续同步。");
                             } else if current && failure == PublishFailure::Rejected {
                                 eprintln!("[wxclipd] 发送失败且无法自动重试: {error}；修正问题后运行 wxclipd sync-now，或复制新内容。");
+                            } else if current {
+                                let pending = state.outgoing.as_ref().expect("current outgoing value");
+                                eprintln!("[wxclipd] 发送失败（第 {} 次，{} 秒后重试最新内容）: {error}", pending.retry.failures, pending.retry.at.duration_since(failed_at).as_secs());
                             } else {
-                                eprintln!("[wxclipd] 发送失败: {error}；将重试仍待发送的最新内容");
+                                eprintln!("[wxclipd] 旧内容发送失败: {error}；继续处理最新复制的内容");
                             }
                         }
                     },
@@ -192,9 +196,10 @@ pub async fn run(
                         }
                         Err(error) => {
                             runtime_status.network_failed(&error);
-                            poll_retry.failed(Instant::now());
+                            let failed_at = Instant::now();
+                            poll_retry.failed(failed_at);
                             poll_requested = true;
-                            eprintln!("[wxclipd] 拉取失败（第 {} 次，将退避重试）: {error}", poll_retry.failures);
+                            eprintln!("[wxclipd] 拉取失败（第 {} 次，{} 秒后重试）: {error}", poll_retry.failures, poll_retry.at.duration_since(failed_at).as_secs());
                         }
                     },
                     NetworkResult::Prepared { id, result } => match result {
@@ -475,12 +480,19 @@ fn publish_failure(error: &wx_ime_sdk::Error) -> PublishFailure {
         // NotPaired is safely checked before publication. Keep the latest copy
         // so pairing can complete without losing what was copied meanwhile.
         wx_ime_sdk::Error::NotPaired => PublishFailure::Retry,
+        // Control HTTP 400 can require a fresh timestamp/key exchange. The SDK
+        // invalidates that session and bounds recovery for safe queries. Keep
+        // the outbox alive if recovery also fails. Actual publication errors
+        // are still OutcomeUnknown; COS 400 does not imply a stale session.
+        wx_ime_sdk::Error::Http(400) => PublishFailure::Retry,
         error if transient_network_error(error) => PublishFailure::Retry,
         _ => PublishFailure::Rejected,
     }
 }
 
 fn transient_network_error(error: &wx_ime_sdk::Error) -> bool {
+    // Control 400 recovery is handled by the SDK per request, so it must not
+    // also trigger the worker's five-failure transport reconnect below.
     match error {
         wx_ime_sdk::Error::Transport
         | wx_ime_sdk::Error::CosTransport
@@ -768,6 +780,134 @@ mod image_tests {
             path,
             bytes: bytes.len(),
             sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    #[test]
+    fn control_400_retries_text_and_images_with_capped_backoff_until_success() {
+        let image =
+            Arc::new(crate::image::ClipboardImage::from_rgba(1, 1, vec![12, 34, 56, 255]).unwrap());
+        for payload in [
+            Payload::Text("keep this copy".into()),
+            Payload::Image(image),
+        ] {
+            let mut now = Instant::now();
+            let mut state = State::new(true);
+            let status = RuntimeStatus::new(
+                &crate::config::Config::default(),
+                "direct",
+                "test-pc".into(),
+                Duration::from_millis(400),
+            )
+            .unwrap();
+            status.initialized("test-pc".into());
+            state.observe(
+                Snapshot {
+                    content: Some(payload.clone()),
+                    revision: Some(1),
+                },
+                now,
+            );
+            for seconds in [1, 2, 4, 8, 16, 30, 30, 30] {
+                let (generation, pending) = state.outgoing_due(now).unwrap();
+                assert_eq!(pending, payload);
+                let error = wx_ime_sdk::Error::Http(400);
+                status.network_failed(&error);
+                state.send_failed(generation, publish_failure(&error), now);
+                update_local_status(&status, &state);
+                assert_eq!(status.value()["phase"], "retrying");
+                assert_eq!(status.value()["pending_send"], true);
+                assert_eq!(status.value()["send_paused"], false);
+                assert!(status.value()["last_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("自动恢复会话"));
+                now += Duration::from_secs(seconds);
+                assert!(state.outgoing_due(now - Duration::from_millis(1)).is_none());
+                assert_eq!(state.outgoing_due(now).unwrap().1, payload);
+            }
+            let (generation, _) = state.outgoing_due(now).unwrap();
+            state.sent(generation, 10, 21);
+            status.sent();
+            update_local_status(&status, &state);
+            assert!(state.outgoing.is_none());
+            assert_eq!(state.last_published, Some((10, 21)));
+            assert_eq!(status.value()["phase"], "running");
+            assert_eq!(status.value()["pending_send"], false);
+            assert_eq!(status.value()["sent_count"], 1);
+            assert!(status.value()["last_error"].is_null());
+        }
+    }
+
+    #[test]
+    fn new_copy_supersedes_a_control_400_retry_without_manual_intervention() {
+        let now = Instant::now();
+        let mut state = State::new(true);
+        state.observe(
+            Snapshot {
+                content: Some(Payload::Text("old copy".into())),
+                revision: Some(1),
+            },
+            now,
+        );
+        let old = state.outgoing_due(now).unwrap().0;
+        state.send_failed(old, publish_failure(&wx_ime_sdk::Error::Http(400)), now);
+        let latest = Payload::Image(Arc::new(
+            crate::image::ClipboardImage::from_rgba(1, 1, vec![34, 56, 78, 255]).unwrap(),
+        ));
+        state.observe(
+            Snapshot {
+                content: Some(latest.clone()),
+                revision: Some(2),
+            },
+            now,
+        );
+        // A completion from an older operation cannot pause or remove this copy.
+        state.send_failed(
+            old,
+            publish_failure(&wx_ime_sdk::Error::OutcomeUnknown),
+            now,
+        );
+        state.sent(old, 10, 20);
+        let (generation, payload) = state.outgoing_due(now).unwrap();
+        assert_ne!(generation, old);
+        assert_eq!(payload, latest);
+        state.sent(generation, 10, 21);
+        assert!(state.outgoing.is_none());
+    }
+
+    #[test]
+    fn control_recovery_does_not_replay_uncertain_publications_or_invalid_objects() {
+        for (error, expected) in [
+            (
+                wx_ime_sdk::Error::OutcomeUnknown,
+                PublishFailure::OutcomeUnknown,
+            ),
+            (wx_ime_sdk::Error::CosHttp(400), PublishFailure::Rejected),
+            (wx_ime_sdk::Error::Http(403), PublishFailure::Rejected),
+            (
+                wx_ime_sdk::Error::Invalid("object exceeds server COS limit"),
+                PublishFailure::Rejected,
+            ),
+        ] {
+            let now = Instant::now();
+            let mut state = State::new(true);
+            state.observe(
+                Snapshot {
+                    content: Some(Payload::Text("pending copy".into())),
+                    revision: Some(1),
+                },
+                now,
+            );
+            let generation = state.outgoing_due(now).unwrap().0;
+            assert_eq!(publish_failure(&error), expected);
+            state.send_failed(generation, publish_failure(&error), now);
+            assert!(state.outgoing.as_ref().unwrap().paused);
+            assert!(state
+                .outgoing_due(now + Duration::from_secs(3600))
+                .is_none());
+            state.force_retry(now);
+            assert!(state.outgoing_due(now).is_some());
         }
     }
 

@@ -1,4 +1,4 @@
-# WeType Clipboard Sync 0.4.1 · Windows 使用说明
+# WeType Clipboard Sync 0.4.2 · Windows 使用说明
 
 本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 及以上**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
 
@@ -8,8 +8,8 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| `wetype-clipboard-sync-0.4.1-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
-| `wetype-clipboard-sync-0.4.1-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
+| `wetype-clipboard-sync-0.4.2-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
+| `wetype-clipboard-sync-0.4.2-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
 安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，托盘窗口标题为 **WeType 剪贴板同步**。
 
@@ -26,9 +26,9 @@
 
 Windows 版本尚未使用真实手机账号完成端到端实测，需要在你的手机、代理和桌面会话中验证首次配对及双向同步。
 
-### 从 0.2.0 / 0.3.0 / 0.4.0 升级
+### 从 0.2.0 / 0.3.0 / 0.4.0 / 0.4.1 升级
 
-运行 0.4.1 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
+运行 0.4.2 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
 
 ## 托盘、状态与配置
 
@@ -211,6 +211,14 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 
 如果日志显示 **`OutcomeUnknown` / 发送结果不确定**，服务端可能已收到该内容，程序暂停自动重发。需要重试时执行 `.\wxclipd.exe sync-now`，这可能重复发送；也可复制新内容继续同步。
 
+**日志反复出现 `control HTTP status 400`。**
+
+0.4.2 修复了旧版将发布前的控制 HTTP 400 当作不可自动重试错误、持续拉取失败却不重建会话的问题。程序会清除被拒绝的控制会话密钥；可安全重试的控制请求重新校准时间、协商密钥后重试一次。若重建失败，后续请求仍会继续尝试恢复，保留配对身份与代理设置。
+
+在最终发布前遇到该错误时，最新待发文本或图片会保留，按约 1、2、4、8、16、30 秒退避，之后每隔约 30 秒继续尝试；无需反复点「立即同步」。这些是重试等待时间，请求耗时另计。期间复制新内容会替代原待发内容。持续 400 不一定是会话失效；若一直无法恢复，请检查代理和日志，反馈版本号及错误行。
+
+`COS HTTP status 400` 属于对象传输错误，不按控制会话故障自动恢复。如果最终发布请求的结果无法确认，仍按上面的「发送结果不确定」处理，避免自动重复发送。
+
 **哪些内容会同步？**
 
 非空文本（最多 **1 MiB，按 UTF-8 字节**）和上述 PNG / JPEG / Windows 位图内容。程序默认不会上传启动前已有的剪贴板；首次验证请复制新文本或图片。若确实要发送启动前内容，停止后台后前台运行 `.\wxclipd.exe --send-current run`。
@@ -224,7 +232,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 发布页同时提供 `SHA256SUMS.txt`。PowerShell 可计算下载文件的校验值，与对应行比较：
 
 ```powershell
-Get-FileHash .\wetype-clipboard-sync-0.4.1-windows-x86-setup.exe -Algorithm SHA256
+Get-FileHash .\wetype-clipboard-sync-0.4.2-windows-x86-setup.exe -Algorithm SHA256
 ```
 
 本项目是非官方协议实现，与腾讯无关联。源码与许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。

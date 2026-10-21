@@ -19,7 +19,7 @@ $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-stati
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.4.1
+./packaging/windows/build-package.ps1 -Version 0.4.2
 ```
 
 应用、SDK 和协议测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。SDK 不再附带独立 CLI、npm 包及其分发脚本。
@@ -31,7 +31,7 @@ cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxcl
 - 不依赖 OpenSSL 或 MSVC C++ 动态运行库。
 - 可执行文件与安装器包含微信输入法图标，资源版本与 Cargo 版本一致。
 - 当前用户模式安装、常驻托盘、状态窗口、单实例、后台启停、旧版本升级与运行中卸载能够完成。
-- 升级基准为已发布且校验 SHA-256 的 0.4.0 安装包：启动其常驻托盘及同步进程后安装新版，确认旧进程退出，并保留配对身份与配置。
+- 升级基准为已发布且校验 SHA-256 的 0.4.1 安装包：启动其常驻托盘及同步进程后安装新版，确认旧进程退出，并保留配对身份与配置。
 
 Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。
 
@@ -92,7 +92,11 @@ Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shel
 
 本地默认每 400 ms 观察一次，独立于网络请求。远端默认每 10 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
 
-出站只保留最新待发文本或图片，不是历史队列。明确网络失败会退避重试；发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新内容恢复发送；同一内容仅序列号变化不会解除暂停。出站队列不跨进程重启持久化。
+出站只保留最新待发文本或图片，不是历史队列。明确网络失败及发布前的控制 HTTP 400 会退避重试；等待时间依次为 1、2、4、8、16、30 秒，此后保持 30 秒，不因重试次数耗尽而丢弃待发内容。请求耗时另计。发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新内容恢复发送；同一内容仅序列号变化不会解除暂停。出站队列不跨进程重启持久化。
+
+控制 HTTP 400 不足以证明具体服务端原因，但会使 SDK 放弃当前控制密钥。对可安全重试的控制请求，单次调用最多重新获取服务端时间、执行 ECDH 并重试一次；若仍失败，交回上层退避。未初始化或上次初始化被中断 / 失败时，后续控制请求会重新初始化，避免永久停留在 `session not initialized`。恢复沿用原设备身份和显式代理配置；通知 WSS 使用其自己的连接密钥。
+
+最终 `SEND_CLIPBOARD` 发布请求不得因网络失败或会话恢复而盲目重放；无法确认结果时继续返回 `OutcomeUnknown`。`COS HTTP status 400` 不按控制会话错误分类，不能靠重新握手自动解除确定的上传拒绝。
 
 入站持有完整 receipt，图片先在 blocking worker 中检查缓存长度/哈希并解码，再应用到剪贴板。写入成功后才确认；确认失败只重试确认，不重复覆盖。在同一次 Win32 剪贴板锁内比较序列号和写入新值，保护刚发生的本地复制，包括重新复制同一内容。
 
@@ -107,6 +111,8 @@ Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shel
 ## 测试与发布
 
 `.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上执行 Windows 格式检查、构建与测试。测试包含真实文本/图片剪贴板、透明度、占用与序列冲突、本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时、WSS 握手，以及受信本地 TLS 下的加密 COS 图片 PUT/GET 逐字节往返，不依赖用户手机号或配对状态。
+
+控制会话回归测试使用本地模拟服务覆盖 HTTP 400 后重建、持续拒绝的有界恢复、初始化失败后的再次恢复，以及有副作用请求不被自动重放；应用测试覆盖控制 / COS 错误分类、最新值重试和发送结果不确定时的暂停。测试无需真实手机身份。
 
 main 的 Windows 构建、测试和安装验收通过后，在 Windows 发布任务中以 `wxclipd/Cargo.toml` 的版本创建 GitHub Release，上传安装器、便携 ZIP 和 SHA256SUMS。已存在的版本不覆盖；后续发布请递增版本并更新 `packaging/windows/RELEASE-NOTES.md`。
 

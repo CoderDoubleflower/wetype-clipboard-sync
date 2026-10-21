@@ -144,6 +144,7 @@ impl RuntimeStatus {
             Error::Transport | Error::CosTransport | Error::Timeout(_) => {
                 "网络请求失败或超时，正在等待重试。"
             }
+            Error::Http(400) => "控制服务返回 HTTP 400，正在自动恢复会话并重试。",
             Error::Http(_) | Error::CosHttp(_) => "服务器暂未接受请求，请检查网络并查看日志。",
             Error::InvalidClipboard { .. } => "收到的图片无效或超过限制，正在跳过此版本。",
             _ => "同步请求失败，请查看日志；必要时修正设置后立即同步。",

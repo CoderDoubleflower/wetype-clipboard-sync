@@ -14,6 +14,13 @@
   - `crates/wx-ime-protocol/src/transport.rs`: add `UNBIND = 35`.
   - `crates/wx-ime-sdk/src/session.rs`: `group_with_version()` so callers can advertise
     the clipboard revision they already hold.
+  - `crates/wx-ime-sdk/src/session.rs`: invalidate the control key on HTTP 400;
+    safe control queries reinitialize server time/ECDH and retry once. A later
+    request initializes again after an interrupted or failed initialization.
+    Recovery retains the device identity and explicit proxy route. Mutating
+    requests are not blindly replayed after transport or session failures, and
+    clipboard publication with an unknown outcome remains paused by the caller.
+    Local session regression tests cover recovery and bounded failure paths.
   - `crates/wx-ime-sdk/src/storage.rs`: `State::known_clipboard_version()`.
   - `crates/wx-ime-sdk/src/clipboard/receive.rs`: poll with that revision instead of 0,
     so the server stops re-sending unchanged clipboard payloads.

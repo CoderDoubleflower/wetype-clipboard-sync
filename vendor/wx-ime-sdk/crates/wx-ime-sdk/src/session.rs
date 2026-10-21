@@ -34,7 +34,26 @@ pub(crate) struct Session {
     pub offset: i64,
     task: u32,
     capture: Option<Capture>,
+    #[cfg(test)]
+    control_host: Option<String>,
 }
+
+// These commands only inspect state or obtain upload credentials. A lost reply
+// from any other API may mean that the requested mutation has already happened.
+fn can_replay(endpoint: Endpoint) -> bool {
+    matches!(
+        endpoint,
+        Endpoint::Timestamp
+            | Endpoint::Ecdh
+            | Endpoint::Api(
+                transport::GROUP
+                    | transport::COS_CREDENTIALS
+                    | transport::FETCH_BIND
+                    | transport::POLL_CODE
+            )
+    )
+}
+
 impl Session {
     #[cfg(test)]
     pub(crate) fn offline_for_test(store: Store) -> Result<Self> {
@@ -46,6 +65,7 @@ impl Session {
             offset: 0,
             task: 1,
             capture: None,
+            control_host: None,
         })
     }
 
@@ -64,6 +84,8 @@ impl Session {
             offset: 0,
             task: 1,
             capture: capture.map(Capture::new).transpose()?,
+            #[cfg(test)]
+            control_host: None,
         };
         session.initialize().await?;
         Ok(session)
@@ -121,8 +143,13 @@ impl Session {
             .as_mut()
             .map(|capture| capture.request(&packet))
             .transpose()?;
-        // 复用连接可能已被服务端关闭（轮询间隔较长时很常见）：失败后重建一次请求。
-        let url = format!("{}{}", transport::HOST, endpoint.path());
+        // A stale pooled connection may fail after idle polling. Retry only
+        // replay-safe requests: an upload publication may have reached the
+        // service even when its response was lost.
+        let host = transport::HOST;
+        #[cfg(test)]
+        let host = self.control_host.as_deref().unwrap_or(host);
+        let url = format!("{}{}", host, endpoint.path());
         let mut attempt = 0;
         let mut response = loop {
             let mut request = self.http.post(&url);
@@ -132,7 +159,7 @@ impl Session {
             match request.body(packet.body.clone()).send().await {
                 Ok(response) => break response,
                 Err(error) => {
-                    if attempt >= 1 {
+                    if attempt >= 1 || !can_replay(endpoint) {
                         let _ = error;
                         return Err(Error::Transport);
                     }
@@ -149,6 +176,11 @@ impl Session {
             }
         };
         let status = response.status();
+        // An HTTP error body is not an encrypted protocol response. Preserve
+        // its status even when a gateway sends invalid compression or HTML.
+        if !status.is_success() {
+            return Err(Error::Http(status.as_u16()));
+        }
         let compression = response
             .headers()
             .get("Kb-CompressionType")
@@ -163,9 +195,6 @@ impl Session {
                 return Err(Error::Invalid("control response size limit"));
             }
             raw.extend_from_slice(&chunk);
-        }
-        if !status.is_success() {
-            return Err(Error::Http(status.as_u16()));
         }
         let plain = packet::decode(&raw, key, &compression, 2 * 1024 * 1024)?;
         if let (Some(capture), Some(index)) = (&self.capture, capture_index) {
@@ -252,27 +281,48 @@ impl Session {
         command: u32,
         message: M,
     ) -> Result<R> {
-        let key = self
-            .key
-            .clone()
-            .ok_or(Error::Invalid("session not initialized"))?;
-        let plain = packet::envelope(
-            self.store.state.uin,
-            command,
-            &self.device_info(),
-            self.timestamp()?,
-            message.encode_to_vec(),
-        );
-        let task = self.task;
-        self.task = self
-            .task
-            .checked_add(1)
-            .ok_or(Error::Invalid("session task counter exhausted"))?;
-        let response = self
-            .request(Endpoint::Api(command), &plain, Some(&key), task, "")
-            .await?;
-        Ok(R::decode(packet::business_body(&response)?.as_slice())
-            .map_err(wx_ime_protocol::Error::from)?)
+        let endpoint = Endpoint::Api(command);
+        let message = message.encode_to_vec();
+        // initialize() clears the old key before network I/O. If a previous
+        // refresh failed, a later daemon retry must be able to initialize again.
+        // Count that as this call's one refresh to keep persistent failures
+        // bounded and let the caller's backoff control the next attempt.
+        let mut refreshed = self.key.is_none();
+        if refreshed {
+            self.initialize().await?;
+        }
+        loop {
+            let key = self.control_key()?;
+            let plain = packet::envelope(
+                self.store.state.uin,
+                command,
+                &self.device_info(),
+                self.timestamp()?,
+                message.clone(),
+            );
+            let task = self.next_task()?;
+            let response = match self.request(endpoint, &plain, Some(&key), task, "").await {
+                // A stale control key or clock can cause HTTP 400, but the
+                // status alone does not prove either cause. Discard the key,
+                // refresh timestamp/ECDH once, and rebuild only a safe read.
+                // Never replay a publication or another mutation here.
+                Err(Error::Http(400)) => {
+                    self.key = None;
+                    if refreshed || !can_replay(endpoint) {
+                        return Err(Error::Http(400));
+                    }
+                    refreshed = true;
+                    eprintln!(
+                        "[wx-ime-sdk] control HTTP 400 (command {command}); refreshing session"
+                    );
+                    self.initialize().await?;
+                    continue;
+                }
+                other => other?,
+            };
+            return Ok(R::decode(packet::business_body(&response)?.as_slice())
+                .map_err(wx_ime_protocol::Error::from)?);
+        }
     }
     pub async fn group(&mut self, filter: u32) -> Result<Option<wire::Group>> {
         self.group_with_version(filter, None).await
@@ -304,3 +354,6 @@ impl Session {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -275,8 +275,8 @@ try {
     } | ConvertTo-Json | Set-Content (Join-Path $TestState 'config.json') -Encoding utf8
 
     # Verify an upgrade from the previous real release with its resident tray.
-    $OldInstaller = Join-Path $env:RUNNER_TEMP 'wetype-clipboard-sync-0.4.0-windows-x86-setup.exe'
-    Write-Host '[tray check] Obtaining the pinned 0.4.0 installer (45 second download deadline).'
+    $OldInstaller = Join-Path $env:RUNNER_TEMP 'wetype-clipboard-sync-0.4.1-windows-x86-setup.exe'
+    Write-Host '[tray check] Obtaining the pinned 0.4.1 installer (45 second download deadline).'
     if (-not (Test-Path $OldInstaller)) {
         $Http = [Net.Http.HttpClient]::new()
         $Http.Timeout = [TimeSpan]::FromSeconds(45)
@@ -284,27 +284,27 @@ try {
         try {
             # GetByteArrayAsync buffers the complete response, so HttpClient's
             # timeout covers both connection and body, including redirects.
-            $Download = $Http.GetByteArrayAsync('https://github.com/CoderDoubleflower/wetype-clipboard-sync/releases/download/v0.4.0/wetype-clipboard-sync-0.4.0-windows-x86-setup.exe')
+            $Download = $Http.GetByteArrayAsync('https://github.com/CoderDoubleflower/wetype-clipboard-sync/releases/download/v0.4.1/wetype-clipboard-sync-0.4.1-windows-x86-setup.exe')
             [IO.File]::WriteAllBytes($OldInstaller, $Download.GetAwaiter().GetResult())
         } finally { $Http.Dispose() }
     }
-    if ((Get-FileHash $OldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne '7f39c705309b2dbb311d6f273582804bc9302daa677ee2eeaff2c12cd570778f') {
+    if ((Get-FileHash $OldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd725dfc4525ffdb446a673b0337ca5de5808f0460551800beedd735e6b096423') {
         throw 'Previous release checksum mismatch'
     }
-    Write-Host '[tray check] Installing 0.4.0 and starting its resident tray and offline worker.'
+    Write-Host '[tray check] Installing 0.4.1 and starting its resident tray and offline worker.'
     $null = Invoke-Program $OldInstaller $InstallArguments 60000
     $OldTray = Start-OwnedProcess $InstalledTray
     $OldDaemon = Wait-Value {
         $Candidates = @(Get-Process -Name wxclipd -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $InstalledCli })
         if ($Candidates.Count -eq 1 -and (Test-Path (Join-Path $TestState 'identity.json'))) { return $Candidates[0] }
-    } '0.4.0 worker startup'
+    } '0.4.1 worker startup'
     $null = $OldDaemon.Handle
     $OwnedProcesses.Add($OldDaemon)
     $IdentityHash = (Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash
     $ConfigHash = (Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash
-    Write-Host '[tray check] Upgrading the running 0.4.0 installation and checking retained identity/configuration.'
+    Write-Host '[tray check] Upgrading the running 0.4.1 installation and checking retained identity/configuration.'
     $null = Invoke-Program $Installer $InstallArguments 60000
-    if (-not $OldTray.WaitForExit(10000) -or -not $OldDaemon.WaitForExit(10000)) { throw 'Upgrade left the 0.4.0 tray or worker running' }
+    if (-not $OldTray.WaitForExit(10000) -or -not $OldDaemon.WaitForExit(10000)) { throw 'Upgrade left the 0.4.1 tray or worker running' }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Upgrade replaced the existing identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Upgrade changed the saved configuration' }
     $VersionOutput = Invoke-Program $InstalledCli @('--version') -Capture
@@ -415,7 +415,7 @@ try {
     }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Uninstall removed/replaced the retained identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Uninstall removed/changed the retained configuration' }
-    Write-Output 'Native tray verification passed: icon resources, 0.4.0 upgrade, configuration redaction, status window, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
+    Write-Output 'Native tray verification passed: icon resources, 0.4.1 upgrade, configuration redaction, status window, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
 } finally {
     Write-Host '[tray check] Cleaning up isolated test processes and restoring environment.'
     # Only processes created or identified within this isolated installation
