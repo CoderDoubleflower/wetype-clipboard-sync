@@ -26,6 +26,9 @@ jobs:
       CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
@@ -87,14 +90,14 @@ jobs:
             vendor/wx-ime-sdk/target
           key: ${{ steps.windows-cache.outputs.cache-primary-key }}
       - name: Build Windows x86 installer
-        timeout-minutes: 8
+        timeout-minutes: 12
         shell: pwsh
         run: |
           $Manifest = Get-Content wxclipd/Cargo.toml -Raw
           $Version = [regex]::Match($Manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
           ./packaging/windows/build-package.ps1 -Version $Version
       - name: Verify Windows x86 installer and tray
-        timeout-minutes: 8
+        timeout-minutes: 12
         shell: pwsh
         run: |
           $Manifest = Get-Content wxclipd/Cargo.toml -Raw
@@ -106,7 +109,9 @@ jobs:
         with:
           name: windows-diagnostics
           if-no-files-found: ignore
-          path: dist/windows-tray-status.png
+          path: |
+            dist/windows-tray-status*.png
+            dist/wpf-verification/*
       - name: Upload tested Windows packages
         uses: actions/upload-artifact@v4
         with:

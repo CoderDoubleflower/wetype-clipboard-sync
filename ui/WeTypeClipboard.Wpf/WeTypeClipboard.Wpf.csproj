@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>wxclipd-ui</AssemblyName>
+    <RootNamespace>WeTypeClipboard.Wpf</RootNamespace>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <PlatformTarget>x86</PlatformTarget>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <Version>0.5.0</Version>
+    <ApplicationIcon>../../wxclipd/assets/wetype.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Copyright>WeType Clipboard Sync contributors</Copyright>
+    <Description>WeType clipboard sync status and configuration</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="../../wxclipd/assets/wetype.ico" Link="Assets/wetype.ico" />
+  </ItemGroup>
+</Project>

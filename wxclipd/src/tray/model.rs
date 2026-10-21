@@ -81,6 +81,76 @@ impl Default for View {
 }
 
 impl View {
+    /// The WPF process receives only presentation data. Build an explicit
+    /// allowlist instead of forwarding a daemon's arbitrary JSON fields.
+    pub fn ui_snapshot(
+        &self,
+        state: &str,
+        time: impl Fn(Option<u64>) -> String,
+    ) -> Result<Vec<u8>> {
+        let mut display = self.clone();
+        display.runtime = self.runtime.as_ref().map(|runtime| {
+            let mut safe = serde_json::Map::new();
+            for key in [
+                "schema",
+                "pid",
+                "started_at",
+                "last_success_at",
+                "last_send_at",
+                "last_receive_at",
+                "sent_count",
+                "received_count",
+                "poll_interval_seconds",
+                "local_poll_interval_ms",
+            ] {
+                if let Some(value) = runtime[key].as_u64() {
+                    safe.insert(key.to_owned(), value.into());
+                }
+            }
+            for key in ["pending_send", "send_paused", "paste_trigger"] {
+                if let Some(value) = runtime[key].as_bool() {
+                    safe.insert(key.to_owned(), value.into());
+                }
+            }
+            for key in ["phase", "device_name", "last_error", "proxy_source"] {
+                if let Some(value) = runtime[key].as_str() {
+                    safe.insert(key.to_owned(), bounded(value, 2048).into());
+                }
+            }
+            if let Some(proxy) = runtime["proxy"].as_str() {
+                safe.insert(
+                    "proxy".to_owned(),
+                    bounded(&safe_proxy(Some(proxy)), 2048).into(),
+                );
+            }
+            Value::Object(safe)
+        });
+        display.saved_config = bounded(&self.saved_config, 4096);
+        display.operation = self.operation.as_deref().map(|value| bounded(value, 2048));
+        display.notice = self.notice.as_deref().map(|value| bounded(value, 4096));
+        let state = bounded(state, 8192);
+        let bytes = serde_json::to_vec(&json!({
+            "type": "snapshot",
+            "version": env!("CARGO_PKG_VERSION"),
+            "phase_label": display.phase_label(),
+            "phase": display.runtime.as_ref().and_then(|v| v["phase"].as_str()),
+            "busy": display.busy,
+            "running": display.running(),
+            "ready": display.ready,
+            "operation": display.operation,
+            "notice": display.notice,
+            "status_text": display.status_text(time),
+            "config_text": display.config_text(&state),
+            "state_directory": state,
+            "runtime": display.runtime,
+            "saved_config": display.saved_config,
+        }))?;
+        if bytes.len() > 128 * 1024 {
+            bail!("界面状态超过大小限制");
+        }
+        Ok(bytes)
+    }
+
     pub fn running(&self) -> bool {
         self.runtime.as_ref().is_some_and(|value| {
             matches!(
@@ -212,6 +282,10 @@ impl View {
     }
 }
 
+fn bounded(text: &str, characters: usize) -> String {
+    text.chars().take(characters).collect()
+}
+
 pub fn safe_proxy(proxy: Option<&str>) -> String {
     match proxy {
         None | Some("" | "直连" | "direct") => "直连".to_owned(),
@@ -224,6 +298,60 @@ pub fn safe_proxy(proxy: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wpf_snapshot_redacts_credentials_and_omits_unknown_daemon_fields() {
+        let view = View {
+            runtime: Some(json!({
+                "phase": "running", "proxy": "socks5h://secret-user:secret-password@localhost:1080",
+                "device_name": "我的电脑🙂", "sent_count": 7, "pending_send": true,
+                "clipboard": "private clipboard", "private_key": "private key", "future_field": "secret"
+            })),
+            saved_config: "代理：直连".to_owned(),
+            ready: true,
+            ..View::default()
+        };
+        let bytes = view
+            .ui_snapshot("C:\\用户\\设置", |_| "暂无".to_owned())
+            .unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        for secret in [
+            "secret-user",
+            "secret-password",
+            "private clipboard",
+            "private key",
+            "future_field",
+        ] {
+            assert!(!text.contains(secret));
+        }
+        let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(snapshot["type"], "snapshot");
+        assert_eq!(snapshot["runtime"]["sent_count"], 7);
+        assert_eq!(snapshot["runtime"]["device_name"], "我的电脑🙂");
+        assert_eq!(snapshot["runtime"]["proxy"], "socks5h://localhost:1080");
+        assert_eq!(snapshot["running"], true);
+        assert_eq!(snapshot["state_directory"], "C:\\用户\\设置");
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn oversized_display_values_are_bounded_without_splitting_unicode() {
+        let view = View {
+            runtime: Some(json!({"phase":"running", "device_name":"🙂".repeat(100_000)})),
+            ..View::default()
+        };
+        let bytes = view.ui_snapshot("C:\\Test", |_| "暂无".to_owned()).unwrap();
+        assert!(bytes.len() < 128 * 1024);
+        let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            snapshot["runtime"]["device_name"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            2048
+        );
+    }
 
     #[test]
     fn launch_context_distinguishes_direct_environment_and_saved_config() {

@@ -1,6 +1,6 @@
-# WeType Clipboard Sync 0.4.2 · Windows 使用说明
+# WeType Clipboard Sync 0.5.0 · Windows 使用说明
 
-本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 及以上**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
+本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 1607 及以上 / Windows 11**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
 
 ## 安装与首次配对
 
@@ -8,8 +8,8 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| `wetype-clipboard-sync-0.4.2-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
-| `wetype-clipboard-sync-0.4.2-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
+| `wetype-clipboard-sync-0.5.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
+| `wetype-clipboard-sync-0.5.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
 安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，托盘窗口标题为 **WeType 剪贴板同步**。
 
@@ -26,13 +26,17 @@
 
 Windows 版本尚未使用真实手机账号完成端到端实测，需要在你的手机、代理和桌面会话中验证首次配对及双向同步。
 
-### 从 0.2.0 / 0.3.0 / 0.4.0 / 0.4.1 升级
+### 从 0.2.x / 0.3.x / 0.4.x 升级
 
-运行 0.4.2 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
+运行 0.5.0 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
 
 ## 托盘、状态与配置
 
 双击右下角微信输入法图标，打开状态与配置窗口；右键图标打开操作菜单。如果任务栏没有直接显示图标，请展开 `^` 隐藏图标区域，也可以从开始菜单再次打开程序。重复启动会定位已有托盘，不会再启动一套同步进程。Windows 资源管理器重启后，程序会重新登记图标。
+
+状态窗口使用 WPF，提供状态概览、收发统计、运行信息与配置分组，支持窗口缩放、高 DPI 与键盘操作。安装包已经包含 x86 .NET 桌面运行时，无需另外安装。
+
+**自动主题：** 在 Windows「设置 → 个性化 → 颜色」修改应用模式，窗口内容、控件及支持的系统标题栏会即时适应深色 / 浅色。若 Windows 分别设置系统与应用模式，以**应用模式**为准；不需要关闭窗口或重启同步。高对比度开启时使用系统高对比度颜色。
 
 状态窗口定期刷新，提供：
 
@@ -87,7 +91,7 @@ Windows 版本尚未使用真实手机账号完成端到端实测，需要在你
 | **Windows Guide** | 打开本说明 |
 | **Uninstall** | 卸载程序 |
 
-便携版双击 `wxclipd-background.exe` 启动托盘；双击 `wxclipd.exe` 仍可进入设置向导。**这两个文件必须在同一目录**。便携包不自动登记登录自启。
+便携版双击 `wxclipd-background.exe` 启动托盘；双击 `wxclipd.exe` 仍可进入设置向导。**保留这两个文件及完整的 `ui/` 子目录，不要只复制 EXE**。`ui/` 包含 WPF 窗口和随附运行时；直接启动入口仍是 `wxclipd-background.exe`。便携包不自动登记登录自启。
 
 也可以在程序目录打开 PowerShell，运行：
 
@@ -232,7 +236,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 发布页同时提供 `SHA256SUMS.txt`。PowerShell 可计算下载文件的校验值，与对应行比较：
 
 ```powershell
-Get-FileHash .\wetype-clipboard-sync-0.4.2-windows-x86-setup.exe -Algorithm SHA256
+Get-FileHash .\wetype-clipboard-sync-0.5.0-windows-x86-setup.exe -Algorithm SHA256
 ```
 
 本项目是非官方协议实现，与腾讯无关联。源码与许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。

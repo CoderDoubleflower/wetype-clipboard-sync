@@ -26,6 +26,8 @@ Windows 发布包静态链接 OpenSSL（Apache-2.0）以及 Cargo.lock 中锁定
 绑定使用 windows-sys（MIT/Apache-2.0），SOCKS 连接使用 tokio-socks（MIT）。
 图片编解码使用 image（MIT/Apache-2.0）及其 PNG/JPEG 依赖，像素指纹使用 sha2（MIT/Apache-2.0）。
 
+WPF 状态界面使用 Microsoft .NET 10 / Windows Desktop Runtime（MIT 及随附第三方声明），按 win-x86 自包含方式分发。原始许可从实际发布版本的 NuGet runtime packs 提取并放入 `licenses/dotnet/`，包括 .NET Core 的 `LICENSE.TXT`、`THIRD-PARTY-NOTICES.TXT` 和 Windows Desktop 的 `LICENSE`。运行时二进制保留于 `ui/`，不改变其授权。上游见 [.NET Runtime](https://github.com/dotnet/runtime) 与 [WPF](https://github.com/dotnet/wpf)。
+
 安装包和便携包均保留项目 LICENSE、THIRD_PARTY.md、协议 SDK 许可和构建时取得的
 依赖许可。修改或重新分发时请保留这些文件。
 

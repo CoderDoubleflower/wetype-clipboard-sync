@@ -2,13 +2,13 @@
 
 ## 构建范围
 
-项目仅支持 Windows，由 `wxclipd/` 应用和 `vendor/wx-ime-sdk/` 协议 workspace 组成。协议 workspace 仅保留 `wx-ime-sdk` 与 `wx-ime-protocol` 两个库；应用与协议 workspace 分别维护 `Cargo.lock`，固定各自的依赖解析。Rust 最低版本为 1.92，发布目标为 **i686-pc-windows-msvc（32 位 x86）**。
+项目支持 Windows 10 1607 及以上 / Windows 11，由 `wxclipd/` Rust 应用、`ui/WeTypeClipboard.Wpf/` WPF 界面和 `vendor/wx-ime-sdk/` 协议 workspace 组成。协议 workspace 仅保留 `wx-ime-sdk` 与 `wx-ime-protocol` 两个库；应用与协议 workspace 分别维护 `Cargo.lock`，固定各自的依赖解析。Rust 最低版本为 1.92，发布目标为 **i686-pc-windows-msvc（32 位 x86）**。WPF 使用 .NET 10，按 `win-x86` 自包含发布，用户无需另装运行时。
 
 协议中的 `secp128r1` 运算继续使用 OpenSSL；HTTPS/WSS 的 TLS 使用 Rustls。Windows 使用 `vendored-openssl` 从源码静态构建 OpenSSL，并静态链接 MSVC CRT，用户无需另装 OpenSSL 或 VC++ Redistributable。不要把协议曲线替换成另一种算法。
 
 ## 构建 Windows x86
 
-需要 Visual Studio 2022 C++ Build Tools、Windows SDK、Rustup、Perl、NASM、protoc 29.3 和 Inno Setup 6。在 **x86 Native Tools Command Prompt** 中启动 PowerShell，确保这些工具在 PATH 内。
+需要 Visual Studio 2022 C++ Build Tools、Windows SDK、Rustup、Perl、NASM、protoc 29.3、.NET 10 SDK 和 Inno Setup 6。在 **x86 Native Tools Command Prompt** 中启动 PowerShell，确保这些工具在 PATH 内。
 
 使用 i686 主机工具链，使 OpenSSL 的构建脚本和目标程序都使用同一种 CPU 架构：
 
@@ -19,18 +19,19 @@ $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-stati
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.4.2
+./packaging/windows/build-package.ps1 -Version 0.5.0
 ```
 
 应用、SDK 和协议测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。SDK 不再附带独立 CLI、npm 包及其分发脚本。
 
-产物位于 `dist/`。构建脚本要求编译时下载的 OpenSSL 源码许可仍位于 Cargo 缓存中。CI 额外运行 `verify-package.ps1`，需要 `RUNNER_TEMP` 指向临时目录。该脚本验证：
+产物位于 `dist/`。打包脚本会运行 `dotnet publish`，将 WPF 应用与 x86 桌面运行时完整放入包内 `ui/` 子目录；不要删除运行时文件或仅复制 EXE。构建脚本要求 OpenSSL 源码许可仍位于 Cargo 缓存中，.NET runtime pack 的许可仍位于 NuGet 缓存中。CI 额外运行 `verify-package.ps1`，需要 `RUNNER_TEMP` 指向临时目录。该脚本验证：
 
-- CLI、托盘程序和安装器为 x86 PE32；CLI/托盘程序的 Windows 子系统设置正确。
+- CLI、托盘、WPF 程序和安装器为 x86 PE32；各程序的 Windows 子系统设置正确。
 - release 可执行文件可以运行，版本标识为 `windows-x86`。
-- 不依赖 OpenSSL 或 MSVC C++ 动态运行库。
+- Rust 程序不依赖外置 OpenSSL 或 MSVC C++ 动态运行库；WPF 包包含 .NET Core 与 Windows Desktop 运行时。
 - 可执行文件与安装器包含微信输入法图标，资源版本与 Cargo 版本一致。
 - 当前用户模式安装、常驻托盘、状态窗口、单实例、后台启停、旧版本升级与运行中卸载能够完成。
+- 实际 WPF 窗口渲染浅色与深色截图；通过 UI Automation 读取配置和调用按钮，修改 Windows 应用颜色设置后同一个窗口实时切换。
 - 升级基准为已发布且校验 SHA-256 的 0.4.1 安装包：启动其常驻托盘及同步进程后安装新版，确认旧进程退出，并保留配对身份与配置。
 
 Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。
@@ -41,7 +42,9 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 | --- | --- |
 | `wxclipd/src/main.rs` | 命令行、交互配置/配对、离线启动重试 |
 | `wxclipd/src/background.rs` | Windows GUI 子系统入口 |
-| `wxclipd/src/tray.rs` | 常驻托盘、状态窗口、后台进程管理与日志入口 |
+| `wxclipd/src/tray.rs` | 常驻托盘、后台进程控制与日志入口 |
+| `wxclipd/src/tray/wpf.rs` | WPF 子进程与有界标准输入输出通信、退出回收 |
+| `ui/WeTypeClipboard.Wpf/` | WPF 窗口、主题资源、状态绑定和 UI 验证入口 |
 | `wxclipd/src/runtime_status.rs` | 本地运行快照、收发计数与凭据安全的状态输出 |
 | `wxclipd/src/config.rs` | 配置验证与原子保存 |
 | `wxclipd/src/clipboard/` | Win32 剪贴板读写与原生测试 |
@@ -82,11 +85,15 @@ HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码�
 
 初始化网络失败时仍可 `ping`、`inspect` 和 `stop`，其余命令返回初始化状态。`code` 需要前台交互，运行前先停 daemon。
 
-Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shell 通知区域图标与状态窗口；`wxclipd.exe run` 继续负责实际同步。托盘按状态目录去重，复用同一用户已有的同步进程。`stop` 仅停止同步，托盘保留；`wxclipd-background.exe --quit` 同时停止同步并等待托盘退出，用于卸载。升级兼容没有托盘、也不支持 `--quit` 的 0.3.0 启动器。
+Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shell 通知区域图标和进程控制；`wxclipd.exe run` 负责实际同步。第一次打开状态窗口时，托盘启动包内 `ui/wxclipd-ui.exe --bridge`，之后重复打开会激活同一个 WPF 窗口。托盘按状态目录去重，复用同一用户已有的同步进程。`stop` 仅停止同步，托盘保留；`wxclipd-background.exe --quit` 同时停止同步，等待 WPF 子进程及托盘退出后才返回，保证升级 / 卸载可替换运行时文件。升级兼容没有托盘、也不支持 `--quit` 的 0.3.0 启动器。
 
-状态窗口通过后台线程定期调用本地 `inspect`；不能在窗口消息线程进行网络请求或长时间等待。运行快照不包含剪贴板内容、代理凭据、设备密钥或完整远端错误。计数及最近收发时间仅属于当前同步进程，不持久化。窗口展示运行时配置与保存配置的差别，避免把磁盘修改误当成已经生效。
+托盘 worker 定期调用本地 `inspect`，由独立通信线程通过继承的匿名管道向 WPF 传递经过字段筛选与脱敏的 NDJSON 快照；WPF 返回固定白名单操作名，由托盘执行原有控制流程。没有新增公开监听端口，不把代理凭据或启动覆盖环境变量交给界面。管道读写不能阻塞任一窗口消息线程；状态更新只保留最新快照。WPF 在管道断开时退出，托盘退出会等待并回收自己创建的窗口进程。
 
-图标采用原始品牌资源并派生多个 Windows ICO 尺寸，来源与权利说明随仓库保留；不能将其混入原创代码的 MIT 授权。构建时将图标和版本资源嵌入两个可执行文件，安装器也使用同一图标。托盘处理 `TaskbarCreated` 以恢复资源管理器重启后的图标，退出时删除图标。
+运行快照不包含剪贴板内容、代理凭据、设备密钥或完整远端错误。计数及最近收发时间仅属于当前同步进程，不持久化。窗口展示运行时配置与保存配置的差别，避免把磁盘修改误当成已经生效。配对与配置写入继续使用现有向导，避免在界面层复制凭据处理逻辑。
+
+WPF 主题默认跟随 Windows 应用模式，响应 `WM_SETTINGCHANGE` / 系统偏好变化，以动态资源更新颜色并适配支持的标题栏。高对比度优先使用系统颜色。不要仅在启动时读取主题，也不要把硬编码浅色背景混入动态主题控件。窗口采用原生标题栏、可调整尺寸与滚动内容，保留键盘和 UI Automation 操作。`--capture-dir PATH` 是离线验证入口，渲染真实 XAML 的浅色 / 深色 PNG 并输出 `capture-result.json`；发布流程还对实际安装的桥接窗口验证系统主题切换，捕获模式不能替代此项。
+
+图标采用原始品牌资源并派生多个 Windows ICO 尺寸，来源与权利说明随仓库保留；不能将其混入原创代码的 MIT 授权。构建时将图标和版本资源嵌入 Rust 与 WPF 可执行文件，安装器也使用同一图标。托盘处理 `TaskbarCreated` 以恢复资源管理器重启后的图标，退出时删除图标。
 
 ## 同步状态约定
 

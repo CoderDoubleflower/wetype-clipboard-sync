@@ -1,6 +1,8 @@
 # 构建产物
 target/
 /dist/
+ui/**/bin/
+ui/**/obj/
 
 # APK、反编译产物、样本与中间文件：版权与体积原因不分发
 reverse/*

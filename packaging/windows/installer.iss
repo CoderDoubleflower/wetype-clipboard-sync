@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.4.2"
+  #define AppVersion "0.5.0"
 #endif
 #ifndef PackageDir
   #define PackageDir "..\..\dist\package"
@@ -20,7 +20,7 @@ DefaultGroupName=WeType Clipboard Sync
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x86compatible
-MinVersion=10.0
+MinVersion=10.0.14393
 OutputDir={#OutputDirPath}
 OutputBaseFilename=wetype-clipboard-sync-{#AppVersion}-windows-x86-setup
 Compression=lzma2
@@ -41,6 +41,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut for status and sett
 
 [InstallDelete]
 Type: files; Name: "{autodesktop}\WeType Clipboard Setup.lnk"
+; The tray's --quit waits for its WPF child before removing obsolete runtime
+; files. This directory contains application files, never identity or settings.
+Type: filesandordirs; Name: "{app}\ui"
 
 [Files]
 Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

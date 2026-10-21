@@ -33,14 +33,10 @@ public static class WeTypeNativeSmoke {
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")]
-    private static extern bool IsWindowEnabled(IntPtr window);
-    [DllImport("user32.dll")]
     public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetDlgItem(IntPtr window, int id);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wParam,
-        StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+    private static extern IntPtr SendThemeMessage(IntPtr window, uint message, UIntPtr wParam,
+        string value, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
     [DllImport("user32.dll")]
@@ -57,6 +53,11 @@ public static class WeTypeNativeSmoke {
     private static extern IntPtr LoadImageW(IntPtr module, IntPtr name, uint type, int width, int height, uint flags);
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr icon);
+
+    public static void NotifyThemeChange() {
+        UIntPtr result;
+        SendThemeMessage((IntPtr)0xffff, 0x1a, UIntPtr.Zero, "ImmersiveColorSet", 2, 200, out result);
+    }
 
     public static IntPtr FindOwnedWindow(int processId, string expectedClass) {
         IntPtr found = IntPtr.Zero;
@@ -101,21 +102,6 @@ public static class WeTypeNativeSmoke {
         } finally { FreeLibrary(module); }
     }
 
-    public static string ControlText(IntPtr window, int id) {
-        IntPtr control = GetDlgItem(window, id);
-        if (control == IntPtr.Zero) throw new Exception("Missing status/configuration control");
-        var text = new StringBuilder(16384);
-        UIntPtr result;
-        if (SendMessageTimeoutW(control, 0xD, (UIntPtr)text.Capacity, text, 2, 2000, out result) == IntPtr.Zero)
-            throw new Exception("Status/configuration window is not responding");
-        return text.ToString();
-    }
-
-    public static bool ControlEnabled(IntPtr window, int id) {
-        IntPtr control = GetDlgItem(window, id);
-        if (control == IntPtr.Zero) throw new Exception("Missing tray command button");
-        return IsWindowEnabled(control);
-    }
 }
 '@
 
@@ -126,6 +112,10 @@ function Start-OwnedProcess([string]$Executable, [string[]]$Arguments = @(), [bo
     $Info.CreateNoWindow = $true
     $Info.RedirectStandardOutput = $Capture
     $Info.RedirectStandardError = $Capture
+    if ($Capture) {
+        $Info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+        $Info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    }
     foreach ($Argument in $Arguments) { $Info.ArgumentList.Add($Argument) }
     $Process = [Diagnostics.Process]::new()
     $Process.StartInfo = $Info
@@ -212,16 +202,39 @@ function Assert-SecretFree([string]$Text) {
     }
 }
 
+function Read-WpfView {
+    $Output = Invoke-Program $WindowsPowerShell @('-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', $WpfInspection, '-UiProcessId', "$($WpfProcess.Id)") 10000 -Capture
+    return ($Output | ConvertFrom-Json)
+}
+
+function Wait-WpfProcess {
+    $Process = Wait-Value {
+        $Candidates = @(Get-Process -Name wxclipd-ui -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $InstalledUi })
+        if ($Candidates.Count -eq 1) { return $Candidates[0] }
+    } 'WPF companion process' 25
+    $null = $Process.Handle
+    $OwnedProcesses.Add($Process)
+    return $Process
+}
+
+function Invoke-WpfAction([string]$AutomationId) {
+    $null = Wait-Value { (Read-WpfView).controls.$AutomationId.enabled } "enabled WPF action $AutomationId"
+    $null = Invoke-Program $WindowsPowerShell @('-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', $WpfInspection, '-UiProcessId', "$($WpfProcess.Id)", '-Action', 'Invoke', '-AutomationId', $AutomationId) 10000 -Capture
+}
+
 function Post-TrayCommand([int]$CommandId) {
     # Match an actual click: a previous launch/action can still own the worker
     # queue after the named pipe becomes available. Busy buttons reject clicks.
-    $null = Wait-Value { [WeTypeNativeSmoke]::ControlEnabled($StatusWindow, $CommandId) } "enabled tray command $CommandId"
+    $ButtonId = @{1002 = 'StartButton'; 1003 = 'StopButton'; 1004 = 'RestartButton'; 1005 = 'SyncButton'}[$CommandId]
+    $null = Wait-Value { (Read-WpfView).controls.$ButtonId.enabled } "enabled tray command $CommandId"
     if (-not [WeTypeNativeSmoke]::PostMessageW($Controller, 0x111, [UIntPtr]$CommandId, [IntPtr]::Zero)) {
         throw 'Could not deliver the native tray menu command'
     }
 }
 
-function Save-StatusScreenshot([IntPtr]$Window) {
+function Save-StatusScreenshot([IntPtr]$Window, [string]$Theme) {
     Add-Type -AssemblyName System.Drawing
     $Rect = [WeTypeNativeSmoke+RECT]::new()
     if (-not [WeTypeNativeSmoke]::GetWindowRect($Window, [ref]$Rect)) { throw 'Cannot locate status window bounds' }
@@ -230,9 +243,9 @@ function Save-StatusScreenshot([IntPtr]$Window) {
     try {
         $Dc = $Graphics.GetHdc()
         try {
-            if (-not [WeTypeNativeSmoke]::PrintWindow($Window, $Dc, 0)) { throw 'Cannot render native status window' }
+            if (-not [WeTypeNativeSmoke]::PrintWindow($Window, $Dc, 2)) { throw 'Cannot render WPF status window' }
         } finally { $Graphics.ReleaseHdc($Dc) }
-        $Bitmap.Save((Join-Path $Dist 'windows-tray-status.png'), [Drawing.Imaging.ImageFormat]::Png)
+        $Bitmap.Save((Join-Path $Dist "windows-tray-status-$Theme.png"), [Drawing.Imaging.ImageFormat]::Png)
     } finally {
         $Graphics.Dispose()
         $Bitmap.Dispose()
@@ -247,6 +260,12 @@ foreach ($Executable in @('wxclipd.exe', 'wxclipd-background.exe')) {
     $FileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion
     if ($FileVersion -ne $Version) { throw "Wrong executable version resource: $Executable" }
 }
+$WpfExecutable = Join-Path $Dist 'package/ui/wxclipd-ui.exe'
+$WpfIconCount = [WeTypeNativeSmoke]::ExtractIconExW($WpfExecutable, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
+if ($WpfIconCount -eq 0 -or $WpfIconCount -eq [uint32]::MaxValue) { throw 'WPF executable has no application icon resource' }
+$WpfVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($WpfExecutable).FileVersion
+$ExpectedWpfVersion = [regex]::Match($Version, '^\d+\.\d+\.\d+').Value + '.0'
+if ($WpfVersion -ne $ExpectedWpfVersion) { throw "Wrong WPF executable version resource: $WpfVersion" }
 $IconCount = [WeTypeNativeSmoke]::ExtractIconExW($Installer, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
 if ($IconCount -eq 0 -or $IconCount -eq [uint32]::MaxValue) {
     throw 'Installer has no icon resource'
@@ -256,12 +275,18 @@ $InstallDirectory = Join-Path $env:RUNNER_TEMP 'wxclipd-install-test'
 $InstallArguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=', "/DIR=$InstallDirectory")
 $InstalledCli = Join-Path $InstallDirectory 'wxclipd.exe'
 $InstalledTray = Join-Path $InstallDirectory 'wxclipd-background.exe'
+$InstalledUi = Join-Path $InstallDirectory 'ui/wxclipd-ui.exe'
+$WindowsPowerShell = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$WpfInspection = Join-Path $PSScriptRoot 'inspect-wpf-ui.ps1'
 $Uninstaller = Join-Path $InstallDirectory 'unins000.exe'
 $TestState = Join-Path $env:RUNNER_TEMP "wxclipd-install-state-$([Guid]::NewGuid().ToString('N'))"
 $PreviousEnvironment = @{}
 foreach ($Key in @('WXCLIPD_STATE', 'WXCLIPD_PROXY', 'WXCLIPD_NAME')) {
     $PreviousEnvironment[$Key] = [Environment]::GetEnvironmentVariable($Key, 'Process')
 }
+$ThemeKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$PreviousTheme = (Get-ItemProperty -Path $ThemeKey -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme
+$ThemeChanged = $false
 
 try {
     $env:WXCLIPD_STATE = $TestState
@@ -339,23 +364,39 @@ try {
     $null = $Daemon.Handle
     $OwnedProcesses.Add($Daemon)
 
-    Write-Host '[tray check] Reading the native status/configuration controls and checking credential redaction.'
+    Write-Host '[tray check] Inspecting the actual WPF controls and checking credential redaction.'
     $null = [WeTypeNativeSmoke]::PostMessageW($Controller, 0x8004, [UIntPtr]::Zero, [IntPtr]::Zero)
-    $StatusWindow = Wait-Value {
-        $Window = [WeTypeNativeSmoke]::FindOwnedWindow($Tray.Id, 'WeTypeClipboardSyncStatus')
-        if ($Window -ne [IntPtr]::Zero -and [WeTypeNativeSmoke]::IsWindowVisible($Window)) { return $Window }
-    } 'native status/configuration window'
-    $ConfigurationText = Wait-Value {
-        $Text = [WeTypeNativeSmoke]::ControlText($StatusWindow, 1102)
-        if ($Text -match '运行中的实际配置' -and $Text -match 'http://127\.0\.0\.1:1' -and $Text -match 'socks5h://127\.0\.0\.1:1') { return $Text }
-    } 'rendered configuration'
-    $StatusText = Wait-Value {
-        $Text = [WeTypeNativeSmoke]::ControlText($StatusWindow, 1101)
-        if ($Text -match '正在连接服务|正在重试') { return $Text }
-    } 'rendered offline connection state'
-    Assert-SecretFree "$StatusText`n$ConfigurationText"
-    Write-Host '[tray check] Rendering the native status-window screenshot.'
-    Save-StatusScreenshot $StatusWindow
+    $WpfProcess = Wait-WpfProcess
+    $View = Wait-Value {
+        $Current = Read-WpfView
+        if ($Current.ready -and $Current.title -match 'WeType' -and $Current.handle -ne 0) { return $Current }
+    } 'WPF status/configuration window'
+    $StatusWindow = [IntPtr]$View.handle
+    $View = Wait-Value {
+        $Current = Read-WpfView
+        if ($Current.text -match 'http://127\.0\.0\.1:1' -and $Current.text -match 'socks5h://127\.0\.0\.1:1' -and
+            $Current.controls.PhaseLabel.text -match '正在连接服务|正在重试') { return $Current }
+    } 'rendered WPF status and effective/saved proxy configuration'
+    Assert-SecretFree $View.text
+
+    Write-Host '[tray check] Changing the Windows application theme while the same WPF window stays open.'
+    if (-not (Test-Path $ThemeKey)) { New-Item -Path $ThemeKey -Force | Out-Null }
+    foreach ($Theme in @(@{ value = 1; name = 'light'; label = '浅色' }, @{ value = 0; name = 'dark'; label = '深色' })) {
+        $ThemeChanged = $true
+        Set-ItemProperty -Path $ThemeKey -Name AppsUseLightTheme -Value $Theme.value -Type DWord
+        [WeTypeNativeSmoke]::NotifyThemeChange()
+        $null = Wait-Value {
+            $Current = Read-WpfView
+            $Current.controls.ThemeLabel.text -eq "跟随系统 · $($Theme.label)"
+        } "live Windows $($Theme.name) theme adaptation"
+        if ($WpfProcess.HasExited) { throw 'Theme switch restarted/exited the WPF process' }
+        Save-StatusScreenshot $StatusWindow $Theme.name
+    }
+
+    Write-Host '[tray check] Hiding the WPF window while synchronization and the tray remain active.'
+    Invoke-WpfAction 'HideButton'
+    $null = Wait-Value { -not [WeTypeNativeSmoke]::IsWindowVisible($StatusWindow) } 'WPF hide action'
+    if ($Tray.HasExited -or (Inspect-Worker).pid -ne $Daemon.Id) { throw 'Hiding the WPF window stopped the tray or worker' }
 
     # A second launch must activate the existing UI and must not create a
     # second worker or tray. Exercise the normal public executable entry point.
@@ -365,13 +406,15 @@ try {
     if ((Inspect-Worker).pid -ne $Daemon.Id) { throw 'Duplicate launch replaced/duplicated the running worker' }
     $Trays = @(Get-Process -Name wxclipd-background -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $InstalledTray })
     if ($Trays.Count -ne 1 -or $Trays[0].Id -ne $Tray.Id) { throw 'Duplicate launch created another tray resident' }
+    $Windows = @(Get-Process -Name wxclipd-ui -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $InstalledUi })
+    if ($Windows.Count -ne 1 -or $Windows[0].Id -ne $WpfProcess.Id) { throw 'Duplicate launch created another WPF process' }
 
-    Write-Host '[tray check] Exercising Stop, Start and Restart through the native tray command path.'
-    Post-TrayCommand 1003
+    Write-Host '[tray check] Invoking WPF Stop and Start buttons, then the native tray Restart command.'
+    Invoke-WpfAction 'StopButton'
     $null = Wait-Value { (Inspect-Worker -DuringTransition).phase -eq 'stopped' } 'tray Stop action'
     if (-not $Daemon.WaitForExit(10000)) { throw 'Stop menu action left worker running' }
     if ($Tray.HasExited -or -not [WeTypeNativeSmoke]::HasTrayIcon($Controller)) { throw 'Stopping synchronization removed the tray entry' }
-    Post-TrayCommand 1002
+    Invoke-WpfAction 'StartButton'
     $Restarted = Wait-Worker
     if ($Restarted.pid -eq $Daemon.Id) { throw 'Start menu did not start a fresh worker' }
     $Daemon = Get-Process -Id $Restarted.pid
@@ -391,31 +434,33 @@ try {
     # the public quit command and an uninstall with active processes separately.
     Write-Host '[tray check] Reinstalling while the new resident tray and worker are running.'
     $null = Invoke-Program $Installer $InstallArguments 60000
-    if (-not $Tray.WaitForExit(10000)) { throw 'Reinstall left the resident tray running' }
+    if (-not $Tray.WaitForExit(10000) -or -not $WpfProcess.WaitForExit(10000)) { throw 'Reinstall left the tray or WPF window process running' }
     if ((Inspect-Worker).phase -ne 'stopped') { throw 'Reinstall left a worker running' }
-    Write-Host '[tray check] Verifying the public --quit command stops both processes.'
-    $Tray = Start-OwnedProcess $InstalledTray
+    Write-Host '[tray check] Verifying the public --quit command stops tray, WPF and worker.'
+    $Tray = Start-OwnedProcess $InstalledTray @('--show')
+    $WpfProcess = Wait-WpfProcess
     $Status = Wait-Worker
     $Daemon = Get-Process -Id $Status.pid
     $null = $Daemon.Handle
     $OwnedProcesses.Add($Daemon)
     $null = Invoke-Program $InstalledTray @('--quit')
-    if (-not $Tray.WaitForExit(10000) -or -not $Daemon.WaitForExit(10000)) { throw '--quit did not stop tray and worker' }
+    if (-not $Tray.WaitForExit(10000) -or -not $Daemon.WaitForExit(10000) -or -not $WpfProcess.WaitForExit(10000)) { throw '--quit did not stop tray, WPF and worker' }
 
-    Write-Host '[tray check] Uninstalling while tray and worker are running; checking identity/configuration retention.'
-    $Tray = Start-OwnedProcess $InstalledTray
+    Write-Host '[tray check] Uninstalling while tray, WPF and worker are running; checking identity/configuration retention.'
+    $Tray = Start-OwnedProcess $InstalledTray @('--show')
+    $WpfProcess = Wait-WpfProcess
     $Status = Wait-Worker
     $Daemon = Get-Process -Id $Status.pid
     $null = $Daemon.Handle
     $OwnedProcesses.Add($Daemon)
     $null = Invoke-Program $Uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') 60000
-    if (-not $Tray.WaitForExit(10000) -or -not $Daemon.WaitForExit(10000)) { throw 'Uninstall left tray or worker running' }
-    foreach ($Path in @($InstalledCli, $InstalledTray)) {
+    if (-not $Tray.WaitForExit(10000) -or -not $Daemon.WaitForExit(10000) -or -not $WpfProcess.WaitForExit(10000)) { throw 'Uninstall left tray, WPF or worker running' }
+    foreach ($Path in @($InstalledCli, $InstalledTray, $InstalledUi)) {
         if (Test-Path $Path) { throw "Uninstall left an executable behind: $Path" }
     }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Uninstall removed/replaced the retained identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Uninstall removed/changed the retained configuration' }
-    Write-Output 'Native tray verification passed: icon resources, 0.4.1 upgrade, configuration redaction, status window, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
+    Write-Output 'Tray/WPF verification passed: icon resources, 0.4.1 upgrade, configuration redaction, live system theme changes, UI Automation commands, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
 } finally {
     Write-Host '[tray check] Cleaning up isolated test processes and restoring environment.'
     # Only processes created or identified within this isolated installation
@@ -428,6 +473,14 @@ try {
             }
         } catch { Write-Warning "Test process cleanup failed: $_" }
         finally { $Process.Dispose() }
+    }
+    if ($ThemeChanged) {
+        if ($null -eq $PreviousTheme) {
+            Remove-ItemProperty -Path $ThemeKey -Name AppsUseLightTheme -ErrorAction SilentlyContinue
+        } else {
+            Set-ItemProperty -Path $ThemeKey -Name AppsUseLightTheme -Value $PreviousTheme -Type DWord
+        }
+        [WeTypeNativeSmoke]::NotifyThemeChange()
     }
     foreach ($Key in $PreviousEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($Key, $PreviousEnvironment[$Key], 'Process')

@@ -1,7 +1,8 @@
-//! Native Windows notification-area UI. The GUI thread owns windows and icons;
-//! a separate worker owns all blocking IPC and process lifecycle operations.
+//! Windows notification-area controller. WPF owns the presentation window;
+//! separate workers own local IPC, its private bridge, and process lifecycle.
 
 mod worker;
+mod wpf;
 
 use crate::ipc;
 use crate::tray_model::{LaunchContext, View, MAX_LAUNCH_BYTES};
@@ -17,11 +18,8 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME,
+    GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HWND, LPARAM, LRESULT, POINT, SYSTEMTIME,
     WAIT_OBJECT_0, WPARAM,
-};
-use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, COLOR_BTNFACE, DEFAULT_CHARSET, FW_NORMAL, HFONT,
 };
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -29,7 +27,6 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, OpenProcess, ReleaseMutex, WaitForSingleObject, PROCESS_SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
@@ -38,13 +35,13 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CONTROLLER_CLASS: &str = "WeTypeClipboardSyncTray";
-const STATUS_CLASS: &str = "WeTypeClipboardSyncStatus";
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_FINISHED: u32 = WM_APP + 2;
 // Kept stable for installer automation and regression tests.
 const WM_QUIT_TRAY: u32 = WM_APP + 3;
 const WM_SHOW_STATUS: u32 = WM_APP + 4;
 const WM_START_SYNC: u32 = WM_APP + 5;
+const WM_UI_ERROR: u32 = WM_APP + 6;
 const COPY_LAUNCH: usize = 0x5743_4353;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const ID_SHOW: usize = 1001;
@@ -56,12 +53,6 @@ const ID_SETUP: usize = 1006;
 const ID_LOG: usize = 1007;
 const ID_FOLDER: usize = 1008;
 const ID_EXIT: usize = 1009;
-const ID_HIDE: usize = 1010;
-const STATUS_TEXT: i32 = 1101;
-const CONFIG_TEXT: i32 = 1102;
-const HEADING: i32 = 1103;
-const SUBTITLE: i32 = 1104;
-const FOOTER: i32 = 1105;
 
 type SharedView = Arc<Mutex<View>>;
 enum Action {
@@ -249,17 +240,13 @@ fn request_exit(window: HWND) -> Result<()> {
 struct Ui {
     state: PathBuf,
     controller: Cell<HWND>,
-    status: Cell<HWND>,
     icon_small: HICON,
     icon_large: HICON,
-    font: HFONT,
-    heading_font: HFONT,
     taskbar_created: u32,
     icon_added: Cell<bool>,
     view: SharedView,
     sender: SyncSender<Action>,
-    status_cache: RefCell<String>,
-    config_cache: RefCell<String>,
+    display: RefCell<Option<wpf::Bridge>>,
 }
 
 impl Drop for Ui {
@@ -270,12 +257,6 @@ impl Drop for Ui {
             }
             if !self.icon_large.is_null() {
                 DestroyIcon(self.icon_large);
-            }
-            if !self.font.is_null() {
-                DeleteObject(self.font);
-            }
-            if !self.heading_font.is_null() {
-                DeleteObject(self.heading_font);
             }
         }
     }
@@ -311,63 +292,19 @@ fn run_ui(args: Args, key: &str) -> Result<()> {
         }
         bail!("程序图标资源缺失，请重新安装完整安装包");
     }
-    let font_name = wide("Microsoft YaHei UI");
-    let font = unsafe {
-        CreateFontW(
-            -16,
-            0,
-            0,
-            0,
-            FW_NORMAL as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            5,
-            0,
-            font_name.as_ptr(),
-        )
-    };
-    let heading_font = unsafe {
-        CreateFontW(
-            -23,
-            0,
-            0,
-            0,
-            600,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            5,
-            0,
-            font_name.as_ptr(),
-        )
-    };
     let (sender, receiver) = sync_channel(8);
     let mut ui = Box::new(Ui {
         state: args.state.clone(),
         controller: Cell::new(null_mut()),
-        status: Cell::new(null_mut()),
         icon_small: small,
         icon_large: large,
-        font,
-        heading_font,
         taskbar_created: unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
         icon_added: Cell::new(false),
         view: Arc::new(Mutex::new(View::default())),
         sender,
-        status_cache: RefCell::new(String::new()),
-        config_cache: RefCell::new(String::new()),
+        display: RefCell::new(None),
     });
-    let classes: [(&str, WNDPROC); 2] = [
-        (CONTROLLER_CLASS, Some(controller_proc)),
-        (STATUS_CLASS, Some(status_proc)),
-    ];
+    let classes: [(&str, WNDPROC); 1] = [(CONTROLLER_CLASS, Some(controller_proc))];
     for (name, procedure) in classes {
         let name = wide(name);
         let class = WNDCLASSW {
@@ -376,7 +313,6 @@ fn run_ui(args: Args, key: &str) -> Result<()> {
             hInstance: instance,
             hIcon: large,
             hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
-            hbrBackground: (COLOR_BTNFACE as usize + 1) as _,
             lpszClassName: name.as_ptr(),
             ..Default::default()
         };
@@ -404,6 +340,15 @@ fn run_ui(args: Args, key: &str) -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("创建托盘窗口失败");
     }
     ui.controller.set(window);
+    match wpf::Bridge::new(window as usize, ui.view.clone()) {
+        Ok(bridge) => *ui.display.borrow_mut() = Some(bridge),
+        Err(error) => {
+            unsafe {
+                DestroyWindow(window);
+            }
+            return Err(error);
+        }
+    }
     add_icon(&ui);
     unsafe {
         SetTimer(window, 1, 1000, None);
@@ -445,19 +390,16 @@ fn run_ui(args: Args, key: &str) -> Result<()> {
             message_error = Some(std::io::Error::last_os_error());
             break;
         }
-        let status = ui.status.get();
-        if status.is_null() || unsafe { IsDialogMessageW(status, &message) } == 0 {
-            unsafe {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
     }
+    // Join the presentation bridge and close its owned WPF child before the
+    // launcher returns to an installer or uninstaller.
+    ui.display.borrow_mut().take();
     delete_icon(&ui);
     unsafe {
-        if !ui.status.get().is_null() {
-            DestroyWindow(ui.status.get());
-        }
         if IsWindow(window) != 0 {
             DestroyWindow(window);
         }
@@ -538,36 +480,9 @@ fn refresh(ui: &Ui) {
     if ui.icon_added.get() && unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } == 0 {
         ui.icon_added.set(false);
     }
-    let window = ui.status.get();
-    if window.is_null() {
-        return;
-    }
-    let status = view.status_text(local_time);
-    if *ui.status_cache.borrow() != status {
-        *ui.status_cache.borrow_mut() = status.clone();
-        unsafe {
-            SetWindowTextW(GetDlgItem(window, STATUS_TEXT), wide(&status).as_ptr());
-        }
-    }
-    let config = view.config_text(&ui.state.display().to_string());
-    if *ui.config_cache.borrow() != config {
-        *ui.config_cache.borrow_mut() = config.clone();
-        unsafe {
-            SetWindowTextW(GetDlgItem(window, CONFIG_TEXT), wide(&config).as_ptr());
-        }
-    }
-    for (id, enabled) in [
-        (ID_START, !view.running()),
-        (ID_STOP, view.running()),
-        (ID_RESTART, true),
-        (ID_SYNC, view.running()),
-        (ID_SETUP, true),
-    ] {
-        unsafe {
-            EnableWindow(
-                GetDlgItem(window, id as i32),
-                i32::from(enabled && !view.busy),
-            );
+    if let Some(bridge) = ui.display.borrow().as_ref() {
+        if let Ok(snapshot) = view.ui_snapshot(&ui.state.display().to_string(), local_time) {
+            bridge.update(snapshot);
         }
     }
 }
@@ -625,10 +540,6 @@ fn command(ui: &Ui, id: usize) {
         ID_SYNC => send_action(ui, Action::Sync),
         ID_SETUP => send_action(ui, Action::Setup),
         ID_EXIT => send_action(ui, Action::Exit),
-        ID_HIDE | 2 => unsafe {
-            // IDCANCEL: Escape closes only the status window.
-            ShowWindow(ui.status.get(), SW_HIDE);
-        },
         ID_LOG | ID_FOLDER => {
             let result = if id == ID_LOG {
                 std::process::Command::new("notepad.exe")
@@ -758,6 +669,18 @@ unsafe extern "system" fn controller_proc(
             send_action(ui, Action::Start);
             0
         }
+        WM_UI_ERROR => {
+            // A missing/broken companion must be visible even when no WPF
+            // window could be created; the tray and synchronization stay alive.
+            MessageBoxW(
+                window,
+                wide("无法打开 WPF 界面。请重新安装完整安装包，或完整解压便携包（包含 ui 目录）。")
+                    .as_ptr(),
+                wide("WeType 剪贴板同步").as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+            0
+        }
         WM_QUIT_TRAY | WM_CLOSE => {
             send_action(ui, Action::Exit);
             0
@@ -791,9 +714,8 @@ unsafe extern "system" fn controller_proc(
         }
         WM_FINISHED => {
             delete_icon(ui);
-            let status = ui.status.replace(null_mut());
-            if !status.is_null() {
-                DestroyWindow(status);
+            if let Some(bridge) = ui.display.borrow().as_ref() {
+                bridge.request_shutdown();
             }
             DestroyWindow(window);
             0
@@ -812,226 +734,9 @@ unsafe extern "system" fn controller_proc(
 }
 
 fn show_status(ui: &Ui) {
-    let mut window = ui.status.get();
-    if window.is_null() {
-        let height = unsafe { GetSystemMetrics(SM_CYSCREEN) }
-            .saturating_sub(80)
-            .clamp(560, 780);
-        window = unsafe {
-            CreateWindowExW(
-                WS_EX_APPWINDOW | WS_EX_CONTROLPARENT,
-                wide(STATUS_CLASS).as_ptr(),
-                wide("WeType 剪贴板同步 — 状态与配置").as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                760,
-                height,
-                null_mut(),
-                null_mut(),
-                GetModuleHandleW(null()),
-                (ui as *const Ui).cast(),
-            )
-        };
-        if window.is_null() {
-            return;
-        }
-        ui.status.set(window);
-        unsafe {
-            SendMessageW(
-                window,
-                WM_SETICON,
-                ICON_SMALL as usize,
-                ui.icon_small as isize,
-            );
-            SendMessageW(
-                window,
-                WM_SETICON,
-                ICON_BIG as usize,
-                ui.icon_large as isize,
-            );
-        }
-        create_control(ui, window, "STATIC", "WeType 剪贴板同步", HEADING, 0, false);
-        create_control(
-            ui,
-            window,
-            "STATIC",
-            &format!(
-                "文本与图片  ·  Windows x86  ·  v{}",
-                env!("CARGO_PKG_VERSION")
-            ),
-            SUBTITLE,
-            0,
-            false,
-        );
-        for id in [STATUS_TEXT, CONFIG_TEXT] {
-            create_control(
-                ui,
-                window,
-                "EDIT",
-                "",
-                id,
-                ES_MULTILINE as u32
-                    | ES_READONLY as u32
-                    | ES_AUTOVSCROLL as u32
-                    | WS_VSCROLL
-                    | WS_BORDER,
-                true,
-            );
-        }
-        for (id, label) in [
-            (ID_START, "开始同步"),
-            (ID_STOP, "停止同步"),
-            (ID_SYNC, "立即同步"),
-            (ID_RESTART, "重启同步"),
-            (ID_SETUP, "设置与配对…"),
-            (ID_LOG, "查看日志"),
-            (ID_FOLDER, "打开配置目录"),
-            (ID_HIDE, "关闭窗口"),
-        ] {
-            create_control(
-                ui,
-                window,
-                "BUTTON",
-                label,
-                id as i32,
-                BS_PUSHBUTTON as u32,
-                true,
-            );
-        }
-        create_control(
-            ui,
-            window,
-            "STATIC",
-            "状态每 2 秒刷新；关闭窗口后继续在托盘运行。退出请使用托盘菜单。",
-            FOOTER,
-            0,
-            false,
-        );
-        unsafe {
-            SendMessageW(
-                GetDlgItem(window, HEADING),
-                WM_SETFONT,
-                ui.heading_font as usize,
-                1,
-            );
-        }
-        layout(window);
-        ui.status_cache.borrow_mut().clear();
-        ui.config_cache.borrow_mut().clear();
-    }
     refresh(ui);
-    unsafe {
-        ShowWindow(window, SW_RESTORE);
-        SetForegroundWindow(window);
-        SetFocus(GetDlgItem(window, STATUS_TEXT));
-    }
-}
-
-fn create_control(ui: &Ui, parent: HWND, class: &str, text: &str, id: i32, extra: u32, tab: bool) {
-    let window = unsafe {
-        CreateWindowExW(
-            0,
-            wide(class).as_ptr(),
-            wide(text).as_ptr(),
-            WS_CHILD | WS_VISIBLE | extra | if tab { WS_TABSTOP } else { 0 },
-            0,
-            0,
-            1,
-            1,
-            parent,
-            id as usize as _,
-            GetModuleHandleW(null()),
-            null(),
-        )
-    };
-    if !window.is_null() {
-        unsafe {
-            SendMessageW(window, WM_SETFONT, ui.font as usize, 1);
-        }
-    }
-}
-
-fn layout(window: HWND) {
-    let mut rect = RECT::default();
-    unsafe {
-        GetClientRect(window, &mut rect);
-    }
-    let width = rect.right.max(400);
-    let height = rect.bottom.max(400);
-    let margin = 18;
-    let inner = width - 2 * margin;
-    let content = height - 212;
-    let first = content / 2;
-    let second = content - first;
-    let place = |id, x, y, width, height| unsafe {
-        MoveWindow(GetDlgItem(window, id), x, y, width, height, 1);
-    };
-    place(HEADING, margin, 15, inner, 30);
-    place(SUBTITLE, margin, 49, inner, 25);
-    place(STATUS_TEXT, margin, 83, inner, first);
-    place(CONFIG_TEXT, margin, 95 + first, inner, second);
-    let buttons_top = 106 + content;
-    let button_width = (inner - 3 * 10) / 4;
-    for (index, id) in [
-        ID_START, ID_STOP, ID_SYNC, ID_RESTART, ID_SETUP, ID_LOG, ID_FOLDER, ID_HIDE,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        place(
-            id as i32,
-            margin + (index % 4) as i32 * (button_width + 10),
-            buttons_top + (index / 4) as i32 * 38,
-            button_width,
-            30,
-        );
-    }
-    place(FOOTER, margin, height - 29, inner, 25);
-}
-
-unsafe extern "system" fn status_proc(
-    window: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if message == WM_NCCREATE {
-        let create = &*(lparam as *const CREATESTRUCTW);
-        SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as _);
-        return DefWindowProcW(window, message, wparam, lparam);
-    }
-    let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Ui;
-    if pointer.is_null() {
-        return DefWindowProcW(window, message, wparam, lparam);
-    }
-    let ui = &*pointer;
-    match message {
-        WM_CLOSE => {
-            ShowWindow(window, SW_HIDE);
-            0
-        }
-        WM_COMMAND => {
-            command(ui, wparam & 0xffff);
-            0
-        }
-        WM_SIZE => {
-            layout(window);
-            0
-        }
-        WM_GETMINMAXINFO => {
-            let size = &mut *(lparam as *mut MINMAXINFO);
-            size.ptMinTrackSize = POINT { x: 600, y: 560 };
-            0
-        }
-        WM_NCDESTROY => {
-            if ui.status.get() == window {
-                ui.status.set(null_mut());
-            }
-            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
-            DefWindowProcW(window, message, wparam, lparam)
-        }
-        _ => DefWindowProcW(window, message, wparam, lparam),
+    if let Some(bridge) = ui.display.borrow().as_ref() {
+        bridge.show();
     }
 }
 
@@ -1041,11 +746,11 @@ mod tests {
 
     #[test]
     fn native_window_creation_preserves_titles_and_instance_discovery() {
-        // Exercise both production window procedures without starting a worker
+        // Exercise the production window procedure without starting a worker
         // or touching the user's state. A null Ui pointer deliberately delegates
         // subsequent messages to DefWindowProc; WM_NCCREATE still takes exactly
         // the production path that used to discard the title.
-        let procedures: [WNDPROC; 2] = [Some(controller_proc), Some(status_proc)];
+        let procedures: [WNDPROC; 1] = [Some(controller_proc)];
         for (index, procedure) in procedures.into_iter().enumerate() {
             let instance = unsafe { GetModuleHandleW(null()) };
             let class_name = wide(&format!(

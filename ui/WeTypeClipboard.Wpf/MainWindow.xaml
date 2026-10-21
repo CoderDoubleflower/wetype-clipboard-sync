@@ -1,0 +1,259 @@
+<Window x:Class="WeTypeClipboard.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WeType 剪贴板同步 — 状态与配置"
+        AutomationProperties.AutomationId="MainWindow"
+        Width="960" Height="820" MinWidth="740" MinHeight="560"
+        WindowStartupLocation="CenterScreen" Icon="Assets/wetype.ico"
+        Background="{DynamicResource WindowBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        PreviewKeyDown="Window_PreviewKeyDown" Closing="Window_Closing">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Margin="30,25,30,22">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Image Source="Assets/wetype.ico" Width="42" Height="42" Margin="0,0,14,0"
+                   RenderOptions.BitmapScalingMode="HighQuality" />
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <TextBlock Text="WeType 剪贴板同步" FontSize="22" FontWeight="SemiBold" />
+                <TextBlock Text="跨设备文本与图片同步" Style="{StaticResource SecondaryText}" Margin="0,3,0,0" />
+            </StackPanel>
+            <Border Grid.Column="2" Background="{DynamicResource SubtleBrush}" CornerRadius="14"
+                    Padding="11,6" VerticalAlignment="Center" Margin="12,0,0,0">
+                <TextBlock x:Name="ThemeLabel" Text="跟随系统 · 浅色" FontSize="11.5"
+                           Foreground="{DynamicResource SecondaryTextBrush}"
+                           AutomationProperties.AutomationId="ThemeLabel" />
+            </Border>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Focusable="False" Padding="30,0,30,24">
+            <StackPanel>
+                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                        BorderThickness="1" CornerRadius="12" Padding="24,22">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="42" Height="42" CornerRadius="21" Margin="0,1,15,0" VerticalAlignment="Top">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="{DynamicResource AccentSubtleBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Tone}" Value="warning">
+                                                <Setter Property="Background" Value="{DynamicResource WarningSubtleBrush}" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Tone}" Value="neutral">
+                                                <Setter Property="Background" Value="{DynamicResource SubtleBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding StatusGlyph}" FontFamily="Segoe MDL2 Assets" FontSize="19"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Tone}" Value="warning">
+                                                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Tone}" Value="neutral">
+                                                    <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="{Binding PhaseLabel}" FontSize="21" FontWeight="SemiBold" LineHeight="29"
+                                           AutomationProperties.AutomationId="PhaseLabel" />
+                                <TextBlock Text="{Binding Description}" Style="{StaticResource SecondaryText}" Margin="0,7,0,0" />
+                            </StackPanel>
+                        </Grid>
+                        <WrapPanel Margin="57,20,0,0">
+                            <Button x:Name="StartButton" Content="开始同步" Tag="start" Click="Action_Click"
+                                    Style="{StaticResource PrimaryButton}" IsEnabled="{Binding CanStart}"
+                                    Visibility="{Binding StartVisibility}" Margin="0,0,10,0" MinWidth="110"
+                                    AutomationProperties.AutomationId="StartButton" />
+                            <Button x:Name="SyncButton" Content="立即同步" Tag="sync" Click="Action_Click"
+                                    Style="{StaticResource PrimaryButton}" IsEnabled="{Binding CanSync}"
+                                    Visibility="{Binding StopVisibility}" Margin="0,0,10,0" MinWidth="110"
+                                    AutomationProperties.AutomationId="SyncButton" />
+                            <Button x:Name="StopButton" Content="停止同步" Tag="stop" Click="Action_Click"
+                                    IsEnabled="{Binding CanStop}" Visibility="{Binding StopVisibility}" MinWidth="100"
+                                    AutomationProperties.AutomationId="StopButton" />
+                            <TextBlock Text="{Binding BusyLabel}" Style="{StaticResource SecondaryText}"
+                                       Margin="14,8,0,0" Visibility="{Binding Busy, Converter={StaticResource BoolVisibility}}" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Visibility="{Binding HasNotice, Converter={StaticResource BoolVisibility}}"
+                        Background="{DynamicResource SubtleBrush}" CornerRadius="8" Padding="14,10" Margin="0,12,0,0">
+                    <TextBlock Text="{Binding Notice}" Style="{StaticResource SecondaryText}" AutomationProperties.AutomationId="NoticeText" />
+                </Border>
+
+                <Grid Margin="0,16,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="10" Padding="22,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="本次已发送" Style="{StaticResource FieldLabel}" />
+                                <TextBlock Text="{Binding LastSend}" Style="{StaticResource SecondaryText}" Margin="0,3,0,0" FontSize="11.5" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                                <TextBlock Text="{Binding SentCount}" FontSize="29" FontWeight="SemiBold" AutomationProperties.AutomationId="SentCount" />
+                                <TextBlock Text="条" Style="{StaticResource SecondaryText}" VerticalAlignment="Bottom" Margin="5,0,0,6" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Column="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="10" Padding="22,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="本次已接收" Style="{StaticResource FieldLabel}" />
+                                <TextBlock Text="{Binding LastReceive}" Style="{StaticResource SecondaryText}" Margin="0,3,0,0" FontSize="11.5" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                                <TextBlock Text="{Binding ReceivedCount}" FontSize="29" FontWeight="SemiBold" AutomationProperties.AutomationId="ReceivedCount" />
+                                <TextBlock Text="条" Style="{StaticResource SecondaryText}" VerticalAlignment="Bottom" Margin="5,0,0,6" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid x:Name="DetailsGrid">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <GroupBox x:Name="StatusPanel" Header="运行详情" AutomationProperties.AutomationId="StatusText" VerticalAlignment="Stretch">
+                        <StackPanel>
+                            <TextBlock Text="当前设备" Style="{StaticResource FieldLabel}" />
+                            <TextBlock Text="{Binding DeviceName}" Style="{StaticResource FieldValue}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ProcessDescription}" Style="{StaticResource SecondaryText}" FontSize="11.5" Margin="0,3,0,16" />
+                            <TextBlock Text="启动时间" Style="{StaticResource FieldLabel}" />
+                            <TextBlock Text="{Binding StartedAt}" Style="{StaticResource FieldValue}" Margin="0,0,0,16" />
+                            <TextBlock Text="最近成功操作" Style="{StaticResource FieldLabel}" />
+                            <TextBlock Text="{Binding LastSuccess}" Style="{StaticResource FieldValue}" Margin="0,0,0,16" />
+                            <TextBlock Text="待发送" Style="{StaticResource FieldLabel}" />
+                            <TextBlock Text="{Binding PendingSend}" Style="{StaticResource FieldValue}" />
+                            <Border Visibility="{Binding HasError, Converter={StaticResource BoolVisibility}}" Background="{DynamicResource WarningSubtleBrush}"
+                                    CornerRadius="7" Padding="12,10" Margin="0,16,0,0">
+                                <TextBlock Text="{Binding LastError}" Foreground="{DynamicResource WarningBrush}" FontSize="12" LineHeight="20"
+                                           AutomationProperties.AutomationId="LastError" />
+                            </Border>
+                            <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,20,0,0" Padding="0,14,0,0">
+                                <DockPanel LastChildFill="False">
+                                    <Button Content="查看日志" Tag="log" Click="Action_Click" Style="{StaticResource QuietButton}"
+                                            Margin="-10,0,0,0" AutomationProperties.AutomationId="LogButton" />
+                                    <TextBlock Text="每 2 秒更新" Style="{StaticResource SecondaryText}" FontSize="11.5"
+                                               DockPanel.Dock="Right" VerticalAlignment="Center" />
+                                </DockPanel>
+                            </Border>
+                        </StackPanel>
+                    </GroupBox>
+                    <GroupBox x:Name="ConfigPanel" Grid.Column="2" Header="连接与配置" AutomationProperties.AutomationId="ConfigText" VerticalAlignment="Stretch">
+                        <StackPanel>
+                            <TextBlock Text="运行中的实际配置" Style="{StaticResource FieldLabel}" />
+                            <TextBlock Text="{Binding Proxy}" Style="{StaticResource FieldValue}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ProxySource}" Style="{StaticResource SecondaryText}" FontSize="11.5" Margin="0,3,0,16" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="远端轮询" Style="{StaticResource FieldLabel}" />
+                                    <TextBlock Text="{Binding RemoteInterval}" Style="{StaticResource FieldValue}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                                    <TextBlock Text="本地检查" Style="{StaticResource FieldLabel}" />
+                                    <TextBlock Text="{Binding LocalInterval}" Style="{StaticResource FieldValue}" />
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Text="{Binding PasteTrigger}" Style="{StaticResource SecondaryText}" Margin="0,12,0,0" />
+                            <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,18,0,0" Padding="0,16,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="已保存的配置" Style="{StaticResource FieldLabel}" />
+                                    <TextBlock Text="{Binding SavedConfig}" Style="{StaticResource FieldValue}" FontSize="12.5" />
+                                    <TextBlock Text="保存后重启同步生效；环境变量可覆盖代理设置。"
+                                               Style="{StaticResource SecondaryText}" FontSize="11.5" Margin="0,8,0,0" />
+                                </StackPanel>
+                            </Border>
+                            <WrapPanel Margin="0,18,0,0">
+                                <Button Content="设置与配对" Tag="setup" Click="Action_Click" IsEnabled="{Binding CanConfigure}"
+                                        AutomationProperties.AutomationId="SetupButton" Margin="0,0,8,8" Padding="12,8" />
+                                <Button Content="重启同步" Tag="restart" Click="Action_Click" IsEnabled="{Binding CanConfigure}"
+                                        AutomationProperties.AutomationId="RestartButton" Margin="0,0,0,8" Padding="12,8" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </GroupBox>
+                </Grid>
+
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,20,0,0" Padding="0,14,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="状态目录" Style="{StaticResource FieldLabel}" FontSize="11.5" />
+                            <TextBlock Text="{Binding StateDirectory}" Style="{StaticResource SecondaryText}" FontSize="11.5"
+                                       ToolTip="{Binding StateDirectory}" AutomationProperties.AutomationId="StateDirectory" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="打开配置目录" Tag="folder" Click="Action_Click" Style="{StaticResource QuietButton}"
+                                VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.AutomationId="FolderButton" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="2" Background="{DynamicResource WindowBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="30,11,30,11">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding VersionLabel}" Style="{StaticResource SecondaryText}" FontSize="11" />
+                    <TextBlock Text=" · 关闭窗口后继续在托盘运行" Style="{StaticResource SecondaryText}" FontSize="11" />
+                </StackPanel>
+                <Button Grid.Column="1" Content="收起到托盘" Click="Hide_Click" Style="{StaticResource QuietButton}"
+                        AutomationProperties.AutomationId="HideButton" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
