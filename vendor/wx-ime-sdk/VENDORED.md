@@ -21,6 +21,14 @@
   - `crates/wx-ime-sdk/src/notify.rs`: WebSocket push channel — connect with the
     `wxws_pb` subprotocol, redo ECDH on the socket, subscribe with cmd 8074 and decode
     pushed events. `Cargo.toml` gains `tokio-tungstenite` + `futures-util`.
+  - `crates/wx-ime-sdk/src/network.rs` + `client.rs` + `session.rs` +
+    `clipboard/cos.rs` + `notify.rs`: explicit `ClientOptions::proxy` shared by
+    control HTTP, COS (including text larger than 256 KiB) and WebSocket traffic.
+    Supports HTTP CONNECT and SOCKS5/SOCKS5h with username/password authentication,
+    consistent local/remote DNS, bounded handshakes, normal destination TLS
+    validation, redacted diagnostics and no direct fallback on proxy failure.
+    `Cargo.toml` enables reqwest's `socks` feature and adds the tunnel dependencies;
+    loopback tests cover routing, authentication, DNS and failure handling.
 
 This tree is the protocol layer (`crates/wx-ime-protocol`) and async client
 (`crates/wx-ime-sdk`) for the WeType (微信输入法) cross-device clipboard. The

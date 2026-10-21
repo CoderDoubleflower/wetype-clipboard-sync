@@ -1,20 +1,28 @@
 [package]
 name = "wxclipd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
-license = "Apache-2.0"
-description = "Linux clipboard sync daemon for WeType cross-device clipboard"
+license = "MIT"
+description = "Windows and Linux clipboard sync for WeType cross-device clipboard"
 publish = false
 
 [[bin]]
 name = "wxclipd"
 path = "src/main.rs"
 
+[[bin]]
+name = "wxclipd-background"
+path = "src/background.rs"
+
+[features]
+default = []
+vendored-openssl = ["wx-ime-sdk/vendored-openssl"]
+
 [dependencies]
 anyhow = "1"
-evdev = "0.13"
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
@@ -26,6 +34,23 @@ tokio = { version = "1", features = [
     "sync",
 ] }
 wx-ime-sdk = { path = "../vendor/wx-ime-sdk/crates/wx-ime-sdk" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+arboard = { version = "3.6", default-features = false }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 lto = "thin"

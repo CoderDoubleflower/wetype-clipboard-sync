@@ -1,136 +1,120 @@
 # 开发说明
 
-## 环境
+## 构建范围
+
+项目由 `wxclipd/` 应用和 `vendor/wx-ime-sdk/` 独立 Cargo workspace 组成，各自使用自己的 `Cargo.lock`。Rust 最低版本为 1.92。Windows 发布目标是 **i686-pc-windows-msvc（32 位 x86）**，Linux 保留 Wayland/X11 支持。
+
+协议中的 `secp128r1` 运算继续使用 OpenSSL；HTTPS/WSS 的 TLS 使用 Rustls。Windows 使用 `vendored-openssl` 从源码静态构建 OpenSSL，并静态链接 MSVC CRT，用户无需另装 OpenSSL 或 VC++ Redistributable。不要把协议曲线替换成另一种算法。
+
+## Linux
 
 ```sh
 sudo apt install protobuf-compiler libssl-dev pkg-config wl-clipboard
-cargo --version   # 需要 1.92 或更新
+# X11 桌面用 xclip 代替 wl-clipboard。
+cargo test --locked --manifest-path wxclipd/Cargo.toml
+cargo test --locked --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml
+cargo build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
 ```
 
-OpenSSL 必须支持 `secp128r1`（Debian 13 自带 3.5.x 支持）。自带的
-`openssl ecparam -list_curves | grep secp128r1` 能确认。
+系统 OpenSSL 需要支持 `secp128r1`，可以用 `openssl ecparam -list_curves` 检查。也可启用 `--features vendored-openssl`，这需要 C 编译器、Perl 和 Make。
 
-## 构建与测试
+## Windows x86
+
+需要 Visual Studio 2022 C++ Build Tools、Windows SDK、Rustup、Perl、NASM、protoc 29.3 和 Inno Setup 6。在 **x86 Native Tools Command Prompt** 中启动 PowerShell，确保这些工具在 PATH 内。
+
+使用 i686 主机工具链，使 OpenSSL 的构建脚本和目标程序都使用同一种 CPU 架构：
+
+```powershell
+rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal
+$env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
+
+cargo +1.92.0-i686-pc-windows-msvc test --locked --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+cargo +1.92.0-i686-pc-windows-msvc test --locked --manifest-path vendor/wx-ime-sdk/Cargo.toml -p wx-ime-sdk -p wx-ime-protocol --features wx-ime-sdk/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
+
+./packaging/windows/build-package.ps1 -Version 0.2.0
+```
+
+产物位于 `dist/`。构建脚本要求编译时下载的 OpenSSL 源码许可仍位于 Cargo 缓存中。CI 额外运行 `verify-package.ps1`，需要 `RUNNER_TEMP` 指向临时目录。该脚本验证：
+
+- CLI、后台启动器和安装器为 x86 PE32；CLI/启动器的 Windows 子系统设置正确。
+- release 可执行文件可以运行，版本标识为 `windows-x86`。
+- 不依赖 OpenSSL 或 MSVC C++ 动态运行库。
+- 当前用户模式安装、后台进程启动、停止和卸载能够完成。
+
+Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。
+
+## 代码结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `wxclipd/src/main.rs` | 命令行、交互配置/配对、离线启动重试 |
+| `wxclipd/src/background.rs` | Windows 无控制台启动器、日志重定向 |
+| `wxclipd/src/config.rs` | 配置验证与原子保存 |
+| `wxclipd/src/clipboard/` | Win32 剪贴板和 Wayland/X11 后端 |
+| `wxclipd/src/input_watch/` | Windows 输入 hooks、Linux evdev 触发 |
+| `wxclipd/src/ipc/` | Windows Named Pipe、Linux Unix socket |
+| `wxclipd/src/sync.rs` | 本地观察、网络 worker、控制命令 |
+| `wxclipd/src/sync/state.rs` | 最新值队列、receipt/ack 与冲突状态机 |
+| `vendor/wx-ime-sdk/crates/wx-ime-sdk/src/network.rs` | HTTP/SOCKS 路由与 WebSocket 隧道 |
+| `packaging/windows/` | 安装器、打包/验证脚本、用户文档 |
+| `docs/` | 协议记录与逆向证据 |
+
+## 配置和网络
+
+`config.json` 保存 `proxy`、`poll_interval_seconds` 和 `paste_trigger`。代理优先级是命令行、`WXCLIPD_PROXY`、配置文件、直连。环境变量为空表示显式直连；系统 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 不改变应用路由。
+
+HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码认证。`socks5://` 本地解析目标域名，`socks5h://` 把目标域名交给代理。控制 API、COS 文本下载/上传和通知 WSS 使用同一配置，不在代理失败时回退直连。当前应用只同步文本；SDK 中应用未使用的文件传输通道没有扩展代理能力。
+
+不要在错误或日志中输出原始代理 URL。认证信息留在受当前用户访问权限保护的配置文件中，并通过子进程环境传递最终代理设置，避免放进后台进程参数。
+
+## 状态与本地控制
+
+Windows 默认状态目录是 `%LOCALAPPDATA%\wxclipd`；Linux 是 `$XDG_STATE_HOME/wxclipd` 或 `~/.local/state/wxclipd`。测试使用独立 `--state` 目录。身份私钥和待确认 receipt 存在此处；同一个目录只能有一个同步进程。
+
+Windows 状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒绝远程 Named Pipe 客户端。Linux 目录为 0700，socket 为 0600。
+
+控制协议每行一个请求，最多 255 字节，回应也按换行分帧：
+
+| 请求 | 作用 |
+| --- | --- |
+| `ping` | 返回 daemon 进程 ID |
+| `stop` | 请求退出；CLI 等待进程结束 |
+| `sync` | 检查本地剪贴板并拉取远端 |
+| `devices` / `status` | 返回设备/剪贴板状态 JSON |
+| `pair <code>` | 输入手机配对码并等待手机确认 |
+| `unbind <uin>` | 解绑指定设备 |
+
+初始化网络失败时仍可 `ping` 和 `stop`，其余命令返回初始化状态。`code` 需要前台交互，运行前先停 daemon。
+
+## 同步状态约定
+
+本地默认每 400 ms 观察一次，独立于网络请求。远端默认 Windows 10 秒、Linux 90 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
+
+出站只保留最新待发文本，不是历史队列。明确网络失败会退避重试；发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新复制恢复发送。出站队列不跨进程重启持久化。
+
+入站持有完整 receipt。写剪贴板成功后才确认；确认失败只重试确认，不重复覆盖。Windows 在同一次剪贴板锁内比较旧值和写入新值，保护刚发生的本地复制。Linux 外部剪贴板命令只能做最后一次重新读取检查，不能提供同样的原子保证。
+
+本地输入监听代码只用 Ctrl/鼠标右键触发拉取。Linux 的 `60-wxclipd-input.rules` 需早于 systemd 的 `73-seat-late.rules` 生效，以便 `uaccess` 授予活跃会话权限。
+
+## 测试与发布
+
+`.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上构建并测试 Linux/Windows。Windows 测试包含真实剪贴板和本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时和 WSS 握手，不依赖用户手机号或配对状态。
+
+main 的 Linux 与 Windows 任务都通过后，以 `wxclipd/Cargo.toml` 的版本创建 GitHub Release，上传安装器、便携 ZIP 和 SHA256SUMS。已存在的版本不覆盖；后续发布请递增版本并更新 `RELEASE-NOTES.md`。
+
+格式检查：
 
 ```sh
-cd wxclipd
-cargo build --release -j 3
-cargo test -j 3
+cargo fmt --manifest-path wxclipd/Cargo.toml --check
+cargo fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
+git diff --check
 ```
 
-协议层测试在 vendor 目录里，另行执行：
+代码测试和安装测试不能代替真实手机验收。验收时配对官方 App，分别测试两端复制中文/emoji/多行文本、超过 256 KiB 的 COS 文本路径、代理断开与恢复、锁屏/睡眠恢复和重新登录自启。
 
-```sh
-cd vendor/wx-ime-sdk && cargo test --workspace -j 3
-```
+## 协议与 APK 分析
 
-## 目录
+调试材料见 `docs/protocol.md`、`docs/cmd-table.md`、`docs/reverse-notes.md`。SDK 的 `ClientOptions.capture_dir` 可保存请求/响应；它们含明文剪贴板数据，勿提交。
 
-| 路径 | 说明 |
-| --- | --- |
-| `wxclipd/src/main.rs` | 命令行：`code`/`pair`/`devices`/`status`/`run` |
-| `wxclipd/src/clipboard.rs` | 桌面剪贴板后端（Wayland/X11） |
-| `wxclipd/src/sync.rs` | 同步主循环与去重 |
-| `vendor/wx-ime-sdk/` | 协议层；改动要记进 `VENDORED.md` |
-| `docs/` | 逆向证据与协议速览 |
-| `reverse/` | 样本与反编译产物，体积大，不要提交 |
-
-## 协议调试
-
-- 抓包与字段含义见 `docs/protocol.md`。
-- SDK 支持把请求/响应落盘（`ClientOptions.capture_dir`），需要时在
-  `wxclipd` 里打开；产物含明文剪贴板内容，注意清理。
-- 请求头、签名 salt、端点等常量可以在 `reverse/work/so/libime_net.so`
-  里用 `strings` 复核。
-
-## 状态目录
-
-默认 `~/.local/state/wxclipd`，包含 `identity.json`（私钥、uin、服务端公钥）、
-`identity.lock`、已消费游标和图片缓存。测试时用 `--state /tmp/...` 隔离。
-同一个状态目录同一时间只能有一个进程（SDK 会加锁）。
-
-## 控制套接字
-
-`wxclipd run` 会在状态目录下创建 `control.sock`（0600），接受单行命令：
-
-| 命令 | 作用 |
-| --- | --- |
-| `sync` | 立即检查本地剪贴板并轮询一次远端 |
-| `devices` | 返回本机与已绑定设备的 JSON |
-| `status` | 返回本机与组内剪贴板状态的 JSON |
-| `pair <code>` | 以加入方身份提交配对码，等对方确认后返回结果 |
-| `unbind <uin>` | 解绑指定设备（命令 35） |
-
-因此 `wxclipd devices` / `status` / `pair` / `unbind` / `sync-now` 在常驻服务运行时也能用，
-不需要先停服务；这些子命令优先走套接字，连不上才自己打开身份文件。
-`code` 需要边显示配对码边等用户确认，仍在本地执行，要先停服务。
-
-## 轮询与带宽
-
-- 本地剪贴板默认 400 ms 检查一次（`--interval`），只在内容变化时才发网络请求。
-- 远端轮询固定 90 秒兜底一次（`--poll-interval`）。正常路径是推送、粘贴触发与手动触发，
-  轮询只在它们都没生效时补一次。请求携带本地已有版本号，服务端会省略未变化的剪贴板内容，
-  实测单次响应约 156 字节；
-  不携带版本号时响应会包含整段剪贴板文本。
-- `cargo run --example probe_group -- ~/.local/state/wxclipd [测试文本]` 可复现这个对比。
-  它会在状态目录下写 `capture-*`（含明文响应），用完自行删除。
-- 推送长连接实现见 `vendor/wx-ime-sdk/crates/wx-ime-sdk/src/notify.rs`；
-  `cargo run -p wx-ime-sdk --example notify_probe -- <状态目录> <设备名> 60` 可单独观察事件。
-  任何推送都会让守护进程立刻拉取一次剪贴板，轮询只是兜底。
-
-### 实测延迟（2026-10-16，本机 → wetype.weixin.qq.com）
-
-| 项目 | 耗时 |
-| --- | --- |
-| TCP 连接 | ~50 ms |
-| TLS 握手完成 | ~150 ms |
-| warm 连接 `/timestamp` 往返 | ~60 ms |
-| warm 连接 `/api_v2` 业务请求（拉一次剪贴板） | 中位 258–270 ms，P95 ~360 ms |
-| 建连 + 握手（timestamp + ECDH） | ~410 ms |
-
-一次拉取约 0.26 秒，其中网络往返约 0.05 秒、其余是服务端业务处理（对照 `/timestamp`
-只有 0.06 秒）。复现：`cargo run -p wx-ime-sdk --example poll_timing -- <状态目录> <设备名> 12 1000`
-（需要先停掉 wxclipd，身份目录同一时间只能被一个进程占用）。
-
-## 粘贴触发（Ctrl/右键）
-
-手机→电脑方向服务端不推事件，所以除了轮询，还监听"可能马上要粘贴"的输入动作：
-
-- 实现：`wxclipd/src/input_watch.rs`，直接读 `/dev/input/event*`（Wayland 没有全局按键接口），
-  只在收到 `KEY_LEFTCTRL`/`KEY_RIGHTCTRL`/`BTN_RIGHT` 的"按下"事件时通知主循环去拉取；
-  其它按键只看类型不看内容，不做任何记录。
-- 防抖：所有设备共享一个时间戳，默认 800 ms（`--paste-trigger-debounce-ms`）。
-- 防覆盖：触发会让拉取更频繁，因此 `poll_remote` 在发布/应用前都会再读一次本机剪贴板，
-  只要发现未发布的新内容就先把它发出去并跳过本轮应用，避免用远端旧内容覆盖刚复制的东西。
-- 权限：`packaging/60-wxclipd-input.rules` 必须在 systemd 自带规则（`73-seat-late.rules`）
-  **之前**执行，否则 `uaccess` 内建拿不到标签。改完要
-  `sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input`。
-- 排查：日志里 `粘贴触发已启用：监听 N 个输入设备`；若为 0，检查规则是否生效
-  （`ls -l /dev/input/event*` 应看到 `+` 号 ACL）。
-
-## 发布
-
-`packaging/install.sh` 把 release 二进制装到 `~/.local/bin/wxclipd` 并登记
-systemd user unit。日志：`journalctl --user -u wxclipd -f`。
-
-## 复现 APK 分析
-
-APK 与反编译产物因版权和体积不随仓库分发，`reverse/` 目录被 `.gitignore` 忽略
-（只保留说明文件）。复现步骤：
-
-1. 自备微信输入法 APK（本项目基于 4.0.0、versionCode 57201）放到 `reverse/`。
-2. 反编译源码与资源：jadx 1.5.6（`--no-res`）、apktool 2.12.0（`d -s`）。
-3. 反编译 React Native 设置页：把 `assets/*.hbc` 交给 hermes-dec。
-4. 用 `strings`、`readelf` 检查 native 库，重点 `libime_net.so`（HTTP 头、签名 salt）、
-   `libwetap_business.so`（端点、取号）、`libcryptopp.so`（secp128r1）。
-5. 结论与证据位置见 `docs/reverse-notes.md`、`docs/cmd-table.md`、`docs/protocol.md`。
-
-## 持续集成
-
-`.github/workflows/ci.yml` 在 Ubuntu 上安装 `protobuf-compiler`、`libssl-dev`、`pkg-config`，
-构建 `wxclipd` 并运行协议层测试。本机可用同样的命令预先验证：
-
-```sh
-cargo build --release --manifest-path wxclipd/Cargo.toml -j 3
-cargo test --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml -j 3
-```
+APK 和反编译产物不随仓库分发。原始分析基于微信输入法 4.0.0（versionCode 57201），复现可自备 APK 放入 `reverse/`，使用 jadx、apktool 和 hermes-dec 分析，再按文档定位 native 库中的协议常量。协议层本地修改记在 `vendor/wx-ime-sdk/VENDORED.md`。

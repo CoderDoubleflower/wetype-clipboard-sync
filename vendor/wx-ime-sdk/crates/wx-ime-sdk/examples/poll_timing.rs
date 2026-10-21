@@ -13,7 +13,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let open_start = Instant::now();
     let client = Client::open(ClientOptions::new(&state, name)).await?;
-    println!("建连+握手（timestamp+ECDH）: {} ms", open_start.elapsed().as_millis());
+    println!(
+        "建连+握手（timestamp+ECDH）: {} ms",
+        open_start.elapsed().as_millis()
+    );
 
     let mut samples = Vec::new();
     for n in 0..count {
@@ -28,7 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("{:?}", received.content).len()
             ),
             Ok(None) => println!("{n:2}: {:7.1} ms  无新内容", elapsed.as_secs_f64() * 1000.0),
-            Err(error) => println!("{n:2}: {:7.1} ms  失败: {error:#}", elapsed.as_secs_f64() * 1000.0),
+            Err(error) => println!(
+                "{n:2}: {:7.1} ms  失败: {error:#}",
+                elapsed.as_secs_f64() * 1000.0
+            ),
         }
         tokio::time::sleep(Duration::from_millis(gap_ms)).await;
     }

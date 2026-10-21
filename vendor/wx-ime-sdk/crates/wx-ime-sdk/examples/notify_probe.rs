@@ -7,8 +7,12 @@ use wx_ime_sdk::{Client, ClientOptions, NotifyEvent};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let state = args.next().expect("用法: notify_probe <状态目录> <设备名> [秒数]");
-    let name = args.next().expect("用法: notify_probe <状态目录> <设备名> [秒数]");
+    let state = args
+        .next()
+        .expect("用法: notify_probe <状态目录> <设备名> [秒数]");
+    let name = args
+        .next()
+        .expect("用法: notify_probe <状态目录> <设备名> [秒数]");
     let seconds: u64 = args.next().and_then(|v| v.parse().ok()).unwrap_or(120);
     let client = Client::open(ClientOptions::new(&state, name)).await?;
     let local = client.local_device().await?;
@@ -18,12 +22,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
     while tokio::time::Instant::now() < deadline {
         match channel.next_event().await? {
-            NotifyEvent::Push { event_type, payload } => {
-                println!("事件 event_type={event_type} payload={}B {}", payload.len(),
-                         payload.iter().take(24).map(|b| format!("{b:02x}")).collect::<String>());
+            NotifyEvent::Push {
+                event_type,
+                payload,
+            } => {
+                println!(
+                    "事件 event_type={event_type} payload={}B {}",
+                    payload.len(),
+                    payload
+                        .iter()
+                        .take(24)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
             }
             NotifyEvent::Idle => {}
-            NotifyEvent::Closed => { println!("连接已关闭"); break; }
+            NotifyEvent::Closed => {
+                println!("连接已关闭");
+                break;
+            }
         }
     }
     client.shutdown().await?;

@@ -1669,6 +1669,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-socks"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-stream"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2217,11 +2229,14 @@ dependencies = [
 name = "wx-ime-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "fs2",
  "futures-util",
  "hex",
+ "httparse",
  "openssl",
+ "percent-encoding",
  "prost",
  "prost-types",
  "reqwest",
@@ -2230,12 +2245,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-socks",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "url",
  "uuid",
  "wx-ime-protocol",
  "zeroize",

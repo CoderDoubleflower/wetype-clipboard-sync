@@ -9,7 +9,7 @@
 //! 已实测：解绑事件（event_type=6）能收到并正确解密。剪贴板事件（4/7）在测试环境没
 //! 有推送，因此上层把它当“有新数据”的唤醒信号，同时保留定时轮询兜底。
 
-use crate::{Client, Error, Result};
+use crate::{Client, Error, Result, network};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use std::collections::BTreeMap;
@@ -18,11 +18,11 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use wx_ime_protocol::crypto::{ControlKey, md5, sha256};
 use wx_ime_protocol::packet::{self, RequestContext};
 use wx_ime_protocol::transport::{Endpoint, SIGN_SALT, VERSION};
-use wx_ime_protocol::{wire, websocket};
+use wx_ime_protocol::{websocket, wire};
 
 /// 官方固定入口与子协议。
 pub const NOTIFY_URL: &str = "wss://wetype.weixin.qq.com/";
@@ -56,6 +56,12 @@ pub struct NotifyChannel {
 impl Client {
     /// 打开推送长连接并完成握手 + 订阅。失败时调用方应回退到轮询。
     pub async fn open_notify_channel(&self) -> Result<NotifyChannel> {
+        tokio::time::timeout(Duration::from_secs(60), self.open_notify_channel_inner())
+            .await
+            .map_err(|_| Error::Timeout("notification channel setup"))?
+    }
+
+    async fn open_notify_channel_inner(&self) -> Result<NotifyChannel> {
         let (uin, device_info, public_key, previous_server_key, timestamp, task) = {
             let mut session = self.session().await?;
             (
@@ -75,7 +81,8 @@ impl Client {
             "Sec-WebSocket-Protocol",
             HeaderValue::from_static(NOTIFY_SUBPROTOCOL),
         );
-        let (mut stream, response) = connect_async(request).await.map_err(|_| Error::Transport)?;
+        let (mut stream, response) =
+            network::connect_websocket(request, self.inner.proxy.as_ref()).await?;
         if response.status().as_u16() != 101 {
             return Err(Error::Transport);
         }
@@ -104,10 +111,7 @@ impl Client {
             0,
         )?;
         let frame = ws_frame(&headers, &body, "/oauth_pubkey_v2")?;
-        stream
-            .send(WsMessage::Binary(frame.into()))
-            .await
-            .map_err(|_| Error::Transport)?;
+        send_frame(&mut stream, WsMessage::Binary(frame.into())).await?;
         let reply = read_frame(&mut stream).await?;
         let ecdh_response = {
             let (headers, body) = split_response(&reply)?;
@@ -139,10 +143,7 @@ impl Client {
             0,
         )?;
         let frame = ws_frame(&headers, &body, API_PATH)?;
-        stream
-            .send(WsMessage::Binary(frame.into()))
-            .await
-            .map_err(|_| Error::Transport)?;
+        send_frame(&mut stream, WsMessage::Binary(frame.into())).await?;
         let reply = read_frame(&mut stream).await?;
         let (status, _) = split_response(&reply)?;
         if status != 200 {
@@ -180,7 +181,7 @@ impl NotifyChannel {
             Ok(Some(Ok(WsMessage::Binary(data)))) => self.decode(&data),
             Ok(Some(Ok(WsMessage::Text(text)))) => self.decode(text.as_bytes()),
             Ok(Some(Ok(WsMessage::Ping(payload)))) => {
-                let _ = self.stream.send(WsMessage::Pong(payload)).await;
+                send_frame(&mut self.stream, WsMessage::Pong(payload)).await?;
                 Ok(NotifyEvent::Idle)
             }
             Ok(Some(Ok(_))) => Ok(NotifyEvent::Idle),
@@ -224,10 +225,7 @@ impl NotifyChannel {
         )?;
         self.task = self.task.wrapping_add(1);
         let frame = ws_frame(&headers, &body, API_PATH)?;
-        self.stream
-            .send(WsMessage::Binary(frame.into()))
-            .await
-            .map_err(|_| Error::Transport)
+        send_frame(&mut self.stream, WsMessage::Binary(frame.into())).await
     }
 }
 
@@ -240,22 +238,17 @@ fn split_response(raw: &[u8]) -> Result<(u32, Vec<u8>)> {
         .as_ref()
         .map(|http| http.status as u32)
         .unwrap_or(0);
-    let body = response
-        .http
-        .map(|http| http.body)
-        .unwrap_or_default();
+    let body = response.http.map(|http| http.body).unwrap_or_default();
     Ok((status, body))
 }
 
-async fn read_frame(
-    stream: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-) -> Result<Vec<u8>> {
+async fn read_frame(stream: &mut WebSocketStream<MaybeTlsStream<TcpStream>>) -> Result<Vec<u8>> {
     loop {
         match tokio::time::timeout(Duration::from_secs(15), stream.next()).await {
             Ok(Some(Ok(WsMessage::Binary(data)))) => return Ok(data.to_vec()),
             Ok(Some(Ok(WsMessage::Text(text)))) => return Ok(text.as_bytes().to_vec()),
             Ok(Some(Ok(WsMessage::Ping(payload)))) => {
-                let _ = stream.send(WsMessage::Pong(payload)).await;
+                send_frame(stream, WsMessage::Pong(payload)).await?;
             }
             Ok(Some(Ok(_))) => continue,
             _ => return Err(Error::Transport),
@@ -263,12 +256,18 @@ async fn read_frame(
     }
 }
 
+async fn send_frame(
+    stream: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    message: WsMessage,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), stream.send(message))
+        .await
+        .map_err(|_| Error::Timeout("notification channel write"))?
+        .map_err(|_| Error::Transport)
+}
+
 /// 构造一帧 `WebSocketPbRequest`：外层字段全零，内层 `HttpRequest` 带 Kb-* 头与密文正文。
-fn ws_frame(
-    headers: &BTreeMap<String, String>,
-    body: &[u8],
-    path: &str,
-) -> Result<Vec<u8>> {
+fn ws_frame(headers: &BTreeMap<String, String>, body: &[u8], path: &str) -> Result<Vec<u8>> {
     let mut http = websocket::HttpRequest {
         method: "POST".to_string(),
         field2: String::new(),
@@ -362,8 +361,11 @@ fn api_packet(
         "Kb-TraceId",
         "Kb-TaskId",
     ];
-    let sign_input =
-        order.iter().map(|name| headers[*name].as_str()).collect::<String>() + SIGN_SALT;
+    let sign_input = order
+        .iter()
+        .map(|name| headers[*name].as_str())
+        .collect::<String>()
+        + SIGN_SALT;
     headers.insert(
         "Kb-Sign".to_string(),
         sha256(sign_input.as_bytes()).to_uppercase(),

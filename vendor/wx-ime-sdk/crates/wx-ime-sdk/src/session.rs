@@ -1,4 +1,6 @@
-use crate::{Error, Result, capture::Capture, error::business, storage::Store};
+use crate::{
+    Error, ProxyConfig, Result, capture::Capture, error::business, network, storage::Store,
+};
 use prost::Message;
 use std::{
     path::PathBuf,
@@ -34,14 +36,13 @@ pub(crate) struct Session {
     capture: Option<Capture>,
 }
 impl Session {
-    pub async fn open(store: Store, capture: Option<PathBuf>) -> Result<Self> {
+    pub async fn open(
+        store: Store,
+        capture: Option<PathBuf>,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self> {
         let identity = IdentityKey::from_pem(store.state.private_pem.as_bytes())?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|_| Error::Transport)?;
+        let http = network::http_client(proxy, Duration::from_secs(20))?;
         let mut session = Self {
             store,
             identity,
@@ -123,7 +124,12 @@ impl Session {
                         return Err(Error::Transport);
                     }
                     if std::env::var("WXDEBUG_TRANSPORT").is_ok() {
-                        eprintln!("[debug] transport retry after: {error}");
+                        // Do not print a transport error's URLs: a proxy may contain credentials.
+                        eprintln!(
+                            "[debug] transport retry (timeout={}, connect={})",
+                            error.is_timeout(),
+                            error.is_connect()
+                        );
                     }
                     attempt += 1;
                 }

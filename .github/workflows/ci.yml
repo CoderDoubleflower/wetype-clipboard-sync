@@ -1,22 +1,142 @@
-name: CI
+name: CI and Windows Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: '1.92.0'
 
 jobs:
-  build:
+  linux:
+    name: Linux build and tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: 安装系统依赖
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libssl-dev pkg-config
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: 构建 wxclipd
-        run: cargo build --release --manifest-path wxclipd/Cargo.toml -j 3
-      - name: 协议层测试
-        run: cargo test --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml -j 3
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            wxclipd/target
+            vendor/wx-ime-sdk/target
+          key: linux-rust-1.92-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+      - name: Check formatting
+        run: |
+          cargo +"$RUST_VERSION" fmt --manifest-path wxclipd/Cargo.toml --check
+          cargo +"$RUST_VERSION" fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
+      - name: Test daemon and protocol workspace
+        run: |
+          cargo +"$RUST_VERSION" test --locked --manifest-path wxclipd/Cargo.toml
+          cargo +"$RUST_VERSION" test --locked --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml
+      - name: Build Linux release
+        run: cargo +"$RUST_VERSION" build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
+
+  windows:
+    name: Windows x86 build, tests and installer
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install x86 Rust and OpenSSL build tools
+        shell: pwsh
+        run: |
+          rustup toolchain install "$env:RUST_VERSION-i686-pc-windows-msvc" --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          choco install nasm --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+          'C:\Program Files\NASM' | Out-File -FilePath $env:GITHUB_PATH -Append
+          'C:\Strawberry\perl\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            wxclipd/target
+            vendor/wx-ime-sdk/target
+          key: windows-x86-static-rust-1.92-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+      - name: Test Windows daemon and protocol workspace
+        shell: pwsh
+        run: |
+          $Toolchain = "$env:RUST_VERSION-i686-pc-windows-msvc"
+          cargo +$Toolchain test --locked --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows daemon tests failed' }
+          cargo +$Toolchain test --locked --manifest-path vendor/wx-ime-sdk/Cargo.toml -p wx-ime-sdk -p wx-ime-protocol --features wx-ime-sdk/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows protocol tests failed' }
+      - name: Build Windows x86 release
+        shell: pwsh
+        run: |
+          cargo +"$env:RUST_VERSION-i686-pc-windows-msvc" build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
+      - name: Package and verify Windows x86 release
+        shell: pwsh
+        run: |
+          $Manifest = Get-Content wxclipd/Cargo.toml -Raw
+          $Version = [regex]::Match($Manifest, '(?m)^version = "([^"]+)"').Groups[1].Value
+          ./packaging/windows/build-package.ps1 -Version $Version
+          ./packaging/windows/verify-package.ps1 -Version $Version
+      - name: Upload tested Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86
+          if-no-files-found: error
+          path: |
+            dist/*-windows-x86-setup.exe
+            dist/*-windows-x86-portable.zip
+            dist/SHA256SUMS.txt
+
+  release:
+    name: Publish Windows release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86
+          path: dist
+      - name: Publish versioned packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("wxclipd/Cargo.toml", "rb"))["package"]["version"])')
+          tag="v${version}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; preserving its published assets."
+            exit 0
+          fi
+          gh release create "$tag" dist/*.exe dist/*.zip dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag — Windows x86 + HTTP/SOCKS proxies" \
+            --notes-file packaging/windows/RELEASE-NOTES.md

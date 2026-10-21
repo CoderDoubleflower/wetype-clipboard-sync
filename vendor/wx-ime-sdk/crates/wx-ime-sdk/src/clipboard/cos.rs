@@ -1,5 +1,5 @@
 use crate::{
-    Error, Result,
+    Error, ProxyConfig, Result, network,
     storage::{private_dir, write_new},
 };
 use serde_json::json;
@@ -12,14 +12,9 @@ pub(crate) struct Cos {
     capture: Option<PathBuf>,
 }
 impl Cos {
-    pub fn new(capture: Option<PathBuf>) -> Result<Self> {
+    pub fn new(capture: Option<PathBuf>, proxy: Option<&ProxyConfig>) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|_| Error::CosTransport)?,
+            http: network::http_client(proxy, Duration::from_secs(30))?,
             capture,
         })
     }

@@ -1,0 +1,5 @@
+{
+  "proxy": null,
+  "poll_interval_seconds": 10,
+  "paste_trigger": true
+}

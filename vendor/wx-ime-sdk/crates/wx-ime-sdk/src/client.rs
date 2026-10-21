@@ -1,5 +1,5 @@
 use crate::{
-    Error, Group, LocalDevice, PairingCode, Result, error::business, session::Session,
+    Error, Group, LocalDevice, PairingCode, ProxyConfig, Result, error::business, session::Session,
     storage::Store,
 };
 use std::{
@@ -18,6 +18,9 @@ pub struct ClientOptions {
     pub state_dir: PathBuf,
     pub device_name: String,
     pub capture_dir: Option<PathBuf>,
+    /// Explicit proxy for control requests, COS objects and WebSocket notifications.
+    /// `None` means direct connections; environment/system proxies are not inherited.
+    pub proxy: Option<ProxyConfig>,
 }
 impl ClientOptions {
     pub fn new(state_dir: impl Into<PathBuf>, device_name: impl Into<String>) -> Self {
@@ -25,6 +28,7 @@ impl ClientOptions {
             state_dir: state_dir.into(),
             device_name: device_name.into(),
             capture_dir: None,
+            proxy: None,
         }
     }
 }
@@ -34,6 +38,7 @@ pub(crate) struct Inner {
     pub lifetime: tokio_util::sync::CancellationToken,
     pub pairing: AtomicBool,
     pub cos: crate::clipboard::cos::Cos,
+    pub proxy: Option<ProxyConfig>,
     pub receive: Mutex<crate::clipboard::ReceiveState>,
 }
 #[derive(Clone)]
@@ -43,8 +48,9 @@ pub struct Client {
 impl Client {
     pub async fn open(options: ClientOptions) -> Result<Self> {
         let store = Store::open(options.state_dir, options.device_name)?;
-        let cos = crate::clipboard::cos::Cos::new(options.capture_dir.clone())?;
-        let session = Session::open(store, options.capture_dir).await?;
+        let cos =
+            crate::clipboard::cos::Cos::new(options.capture_dir.clone(), options.proxy.as_ref())?;
+        let session = Session::open(store, options.capture_dir, options.proxy.as_ref()).await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 session: Mutex::new(session),
@@ -52,6 +58,7 @@ impl Client {
                 lifetime: tokio_util::sync::CancellationToken::new(),
                 pairing: AtomicBool::new(false),
                 cos,
+                proxy: options.proxy,
                 receive: Mutex::new(crate::clipboard::ReceiveState::default()),
             }),
         })

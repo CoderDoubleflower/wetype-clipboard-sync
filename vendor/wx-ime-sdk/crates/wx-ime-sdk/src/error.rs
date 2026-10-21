@@ -18,6 +18,10 @@ pub enum Error {
     Invalid(&'static str),
     #[error("control transport failed")]
     Transport,
+    #[error("proxy operation failed: {0}")]
+    Proxy(&'static str),
+    #[error("HTTP proxy CONNECT rejected with status {0}")]
+    ProxyHttp(u16),
     #[error("control HTTP status {0}")]
     Http(u16),
     #[error("command {command} rejected with status {status}")]
