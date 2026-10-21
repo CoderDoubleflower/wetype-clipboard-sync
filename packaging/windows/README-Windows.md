@@ -11,7 +11,7 @@
 | `wetype-clipboard-sync-0.5.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
 | `wetype-clipboard-sync-0.5.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
-安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，托盘窗口标题为 **WeType 剪贴板同步**。
+安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，状态窗口标题为 **WeType 剪贴板同步 — 状态与配置**。
 
 设置向导依次询问：
 

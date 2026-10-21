@@ -49,7 +49,8 @@ if ($Frameworks.Count -ne 2 -or $Frameworks.name -notcontains 'Microsoft.NETCore
 
 # Exercise the exact packaged WPF application and its real XAML resources.
 # The capture command returns only after rendering both themes and checking
-# layout/contrast/theme state; no installed desktop runtime is needed.
+# layout, rendered button text contrast and theme state; no installed desktop
+# runtime is needed.
 $CaptureDirectory = Join-Path $Dist 'wpf-verification'
 $CaptureInfo = [Diagnostics.ProcessStartInfo]::new($WpfUi)
 $CaptureInfo.UseShellExecute = $false

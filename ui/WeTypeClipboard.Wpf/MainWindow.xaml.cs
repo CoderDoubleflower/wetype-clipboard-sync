@@ -22,6 +22,7 @@ public partial class MainWindow : Window
         _themes.Changed += UpdateThemeLabel;
         UpdateThemeLabel();
         SizeChanged += (_, _) => UpdateResponsiveLayout();
+        ContentRendered += (_, _) => _themes.ApplyTitleBar();
         SourceInitialized += (_, _) =>
         {
             _themes.AttachWindow(new WindowInteropHelper(this).Handle);

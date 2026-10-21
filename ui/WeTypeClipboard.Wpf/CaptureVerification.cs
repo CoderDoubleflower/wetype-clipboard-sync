@@ -56,20 +56,36 @@ internal static class CaptureVerification
         themes.SetCaptureTheme(false);
         await RenderReady(window);
         Require(window.ThemeLabel.Text.EndsWith("浅色") && themes.BackgroundColor == "#FFF5F6F8", "Light theme did not apply.");
+        var lightContrast = VerifyButtonText(window.SyncButton);
         var light = Save(window, themes, directory, "light.png", "light");
-        checks.Add("light theme resources and render");
+        checks.Add($"light primary rendered text contrast {lightContrast:F2}:1");
+        checks.Add("light theme resources and opaque client render");
 
         themes.SetCaptureTheme(true);
         await RenderReady(window);
         Require(window.ThemeLabel.Text.EndsWith("深色") && themes.BackgroundColor == "#FF181A1E", "Dark theme did not apply.");
+        var darkContrast = VerifyButtonText(window.SyncButton);
         var dark = Save(window, themes, directory, "dark.png", "dark");
-        checks.Add("dark theme resources and render");
+        checks.Add($"dark primary rendered text contrast {darkContrast:F2}:1");
+        checks.Add("dark theme resources and opaque client render");
+
+        // Start uses the same primary style but lives in a different state.
+        // Verify its actual generated text after both visibility and theme
+        // changes, including a return from dark to light on the same window.
+        view.Apply(new UiSnapshot { Phase = "stopped", PhaseLabel = "同步已停止", Ready = true });
+        await RenderReady(window);
+        VerifyButtonText(window.StartButton);
+        themes.SetCaptureTheme(false);
+        await RenderReady(window);
+        VerifyButtonText(window.StartButton);
+        checks.Add("start button generated text after live dark-to-light change");
 
         themes.SetCaptureTheme(null);
         File.WriteAllText(Path.Combine(directory, "capture-result.json"), JsonSerializer.Serialize(new
         {
             passed = true,
             version,
+            operating_system = Environment.OSVersion.VersionString,
             light,
             dark,
             checks,
@@ -86,19 +102,77 @@ internal static class CaptureVerification
         window.UpdateLayout();
     }
 
-    private static object Save(Window window, ThemeService themes, string directory, string filename, string theme)
+    private static object Save(MainWindow window, ThemeService themes, string directory, string filename, string theme)
     {
-        var width = (int)Math.Ceiling(window.ActualWidth);
-        var height = (int)Math.Ceiling(window.ActualHeight);
-        Require(width > 0 && height > 0, "Window must have a measured visual tree.");
-        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(window);
+        // Window.ActualHeight includes the native non-client caption, which
+        // RenderTargetBitmap cannot paint. Capture the measured client root
+        // itself, at its real DPI, instead of allocating an empty caption band.
+        var root = window.ClientRoot;
+        var dpi = VisualTreeHelper.GetDpi(root);
+        var width = (int)Math.Round(root.RenderSize.Width * dpi.DpiScaleX);
+        var height = (int)Math.Round(root.RenderSize.Height * dpi.DpiScaleY);
+        Require(width > 0 && height > 0, "Client root must have a measured visual tree.");
+        var bitmap = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+        bitmap.Render(root);
+        var lastPixel = new byte[4];
+        bitmap.CopyPixels(new Int32Rect(width / 2, height - 1, 1, 1), lastPixel, 4, 0);
+        Require(lastPixel[3] == 255, "Client capture has a transparent bottom band.");
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using (var stream = File.Create(Path.Combine(directory, filename)))
             encoder.Save(stream);
         Require(new FileInfo(Path.Combine(directory, filename)).Length > 4096, "Window capture is unexpectedly empty.");
-        return new { theme, background = themes.BackgroundColor, width, height, file = filename };
+        return new { theme, background = themes.BackgroundColor, width, height, file = filename, requested_dark_caption = themes.IsDark && !themes.IsHighContrast, title_bar_hresult = themes.LastTitleBarResult };
+    }
+
+    private static double VerifyButtonText(Button button)
+    {
+        Require(button.IsVisible && button.IsEnabled, "Contrast check requires a visible, enabled button.");
+        button.ApplyTemplate();
+        button.UpdateLayout();
+        var border = button.Template.FindName("ButtonBorder", button) as Border;
+        Require(border?.Background is SolidColorBrush, "The rendered button must have a solid background.");
+        Require(button.Foreground is SolidColorBrush, "The button must declare a contrasting text foreground.");
+        var background = ((SolidColorBrush)border!.Background).Color;
+        var expectedForeground = ((SolidColorBrush)button.Foreground).Color;
+        var labels = VisualDescendants<TextBlock>(button).Where(text => !string.IsNullOrEmpty(text.Text)).ToArray();
+        Require(labels.Length > 0, "No actual rendered label was found inside the button template.");
+        var minimumContrast = double.MaxValue;
+        foreach (var label in labels)
+        {
+            Require(label.Foreground is SolidColorBrush, "The rendered label must have a solid foreground.");
+            var foreground = ((SolidColorBrush)label.Foreground).Color;
+            Require(foreground == expectedForeground, "Generated button text lost the control's foreground through styling.");
+            var contrast = Contrast(foreground, background);
+            Require(contrast >= 4.5, $"Actual button text contrast is only {contrast:F2}:1.");
+            minimumContrast = Math.Min(minimumContrast, contrast);
+        }
+        return minimumContrast;
+    }
+
+    private static IEnumerable<T> VisualDescendants<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T item)
+                yield return item;
+            foreach (var descendant in VisualDescendants<T>(child))
+                yield return descendant;
+        }
+    }
+
+    private static double Contrast(Color first, Color second)
+    {
+        static double Linear(byte component)
+        {
+            var channel = component / 255.0;
+            return channel <= 0.04045 ? channel / 12.92 : Math.Pow((channel + 0.055) / 1.055, 2.4);
+        }
+        static double Luminance(Color color) => 0.2126 * Linear(color.R) + 0.7152 * Linear(color.G) + 0.0722 * Linear(color.B);
+        var one = Luminance(first);
+        var two = Luminance(second);
+        return (Math.Max(one, two) + 0.05) / (Math.Min(one, two) + 0.05);
     }
 
     private static void Require(bool condition, string message)

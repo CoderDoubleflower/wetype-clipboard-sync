@@ -31,7 +31,7 @@ cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxcl
 - Rust 程序不依赖外置 OpenSSL 或 MSVC C++ 动态运行库；WPF 包包含 .NET Core 与 Windows Desktop 运行时。
 - 可执行文件与安装器包含微信输入法图标，资源版本与 Cargo 版本一致。
 - 当前用户模式安装、常驻托盘、状态窗口、单实例、后台启停、旧版本升级与运行中卸载能够完成。
-- 实际 WPF 窗口渲染浅色与深色截图；通过 UI Automation 读取配置和调用按钮，修改 Windows 应用颜色设置后同一个窗口实时切换。
+- 实际 WPF 窗口渲染浅色与深色截图，验证主按钮生成文字的颜色与对比度；通过 UI Automation 读取配置和调用按钮，修改 Windows 应用颜色设置后同一个窗口实时切换。
 - 升级基准为已发布且校验 SHA-256 的 0.4.1 安装包：启动其常驻托盘及同步进程后安装新版，确认旧进程退出，并保留配对身份与配置。
 
 Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。

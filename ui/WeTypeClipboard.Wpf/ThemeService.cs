@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace WeTypeClipboard.Wpf;
@@ -20,6 +21,7 @@ internal sealed class ThemeService : IDisposable
     public event Action? Changed;
     public bool IsDark { get; private set; }
     public bool IsHighContrast { get; private set; }
+    internal int? LastTitleBarResult { get; private set; }
     public string Label => $"跟随系统 · {(IsHighContrast ? "高对比度" : IsDark ? "深色" : "浅色")}";
 
     internal ThemeService(Application application)
@@ -35,6 +37,7 @@ internal sealed class ThemeService : IDisposable
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WindowMessages);
         ApplyTitleBar();
+        ScheduleApply();
     }
 
     private static bool ReadDarkPreference()
@@ -63,7 +66,9 @@ internal sealed class ThemeService : IDisposable
     private void ScheduleApply()
     {
         if (!_disposed && !_application.Dispatcher.HasShutdownStarted)
-            _application.Dispatcher.BeginInvoke(Apply);
+            // Fluent also reacts to the same OS notification. Apply after its
+            // dispatcher work, so it cannot overwrite our final caption mode.
+            _application.Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(Apply));
     }
 
     private void Apply()
@@ -84,15 +89,15 @@ internal sealed class ThemeService : IDisposable
         Changed?.Invoke();
     }
 
-    private void ApplyTitleBar()
+    internal void ApplyTitleBar()
     {
         if (_source is null)
             return;
         var dark = IsDark && !IsHighContrast ? 1 : 0;
-        // Windows 10 versions predating this DWM attribute return an error;
-        // their native caption still remains fully usable.
-        if (DwmSetWindowAttribute(_source.Handle, 20, ref dark, sizeof(int)) != 0)
-            _ = DwmSetWindowAttribute(_source.Handle, 19, ref dark, sizeof(int));
+        // DWMWA_USE_IMMERSIVE_DARK_MODE is documented from Windows 11 build
+        // 22000. Unsupported systems retain their native usable caption; no
+        // undocumented attribute number or uxtheme entry point is required.
+        LastTitleBarResult = DwmSetWindowAttribute(_source.Handle, 20, ref dark, sizeof(int));
     }
 
     // Only the standalone render verifier forces a mode. Normal application

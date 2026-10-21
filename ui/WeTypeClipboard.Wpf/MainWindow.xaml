@@ -9,7 +9,7 @@
         FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="13"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         PreviewKeyDown="Window_PreviewKeyDown" Closing="Window_Closing">
-    <Grid>
+    <Grid x:Name="ClientRoot" Background="{DynamicResource WindowBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />

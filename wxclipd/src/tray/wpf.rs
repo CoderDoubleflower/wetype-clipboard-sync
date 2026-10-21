@@ -10,7 +10,9 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_COMMAND};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AllowSetForegroundWindow, PostMessageW, WM_COMMAND,
+};
 
 #[derive(Default)]
 struct Pending {
@@ -144,6 +146,18 @@ impl Bridge {
                                 last_snapshot = snapshot;
                             }
                             if show {
+                                // The user's tray/shortcut click belongs to
+                                // the controller process. Permit only its own
+                                // display child to activate the existing window.
+                                if let Some(child) = thread_process
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .as_ref()
+                                {
+                                    unsafe {
+                                        AllowSetForegroundWindow(child.id());
+                                    }
+                                }
                                 stdin.write_all(b"{\"type\":\"show\"}\n")?;
                             }
                             stdin.flush()

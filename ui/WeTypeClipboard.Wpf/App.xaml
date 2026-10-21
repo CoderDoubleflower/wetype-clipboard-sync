@@ -7,7 +7,9 @@
         <BooleanToVisibilityConverter x:Key="BoolVisibility" />
 
         <Style TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <!-- Inherit the containing control's foreground. An implicit
+                 setter also reaches generated button labels and overrides
+                 the primary button's contrasting text color. -->
             <Setter Property="TextWrapping" Value="Wrap" />
         </Style>
         <Style x:Key="SecondaryText" TargetType="TextBlock">
@@ -54,6 +56,7 @@
                                 CornerRadius="7" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"
                                               RecognizesAccessKey="True" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -82,7 +85,8 @@
                         <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
                                 CornerRadius="7" Padding="{TemplateBinding Padding}">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" RecognizesAccessKey="True" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">

@@ -173,6 +173,13 @@ pub fn run() -> Result<()> {
             bail!("现有托盘暂时无法接收启动请求，请稍后重试");
         }
         unsafe {
+            // Transfer foreground eligibility from this user-launched process
+            // to the existing tray, which will grant it to its WPF child.
+            let mut owner = 0;
+            GetWindowThreadProcessId(window, &mut owner);
+            if owner != 0 {
+                AllowSetForegroundWindow(owner);
+            }
             PostMessageW(window, WM_SHOW_STATUS, 0, 0);
         }
         return Ok(());
