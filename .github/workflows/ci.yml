@@ -46,7 +46,10 @@ jobs:
           cargo +"$RUST_VERSION" fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
       - name: Test daemon and protocol workspace
         run: |
-          cargo +"$RUST_VERSION" test --locked --manifest-path wxclipd/Cargo.toml
+          # Temporary executable fixtures can inherit writable descriptors
+          # across another test's fork, producing ETXTBSY before exec closes
+          # them. Keep application fixtures isolated without retrying failures.
+          cargo +"$RUST_VERSION" test --locked --manifest-path wxclipd/Cargo.toml -- --test-threads=1
           cargo +"$RUST_VERSION" test --locked --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml
       - name: Build Linux release
         run: cargo +"$RUST_VERSION" build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
