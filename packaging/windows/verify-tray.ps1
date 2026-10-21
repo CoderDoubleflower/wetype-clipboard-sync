@@ -73,13 +73,20 @@ public static class WeTypeNativeSmoke {
         return found;
     }
 
+    public static string LastTrayQuery { get; private set; } = "No icon query yet";
+
     public static bool HasTrayIcon(IntPtr window) {
         var icon = new NOTIFYICONIDENTIFIER {
             cbSize = (uint)Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER)),
             hWnd = window, uID = 1, guidItem = Guid.Empty
         };
         RECT rectangle;
-        return Shell_NotifyIconGetRect(ref icon, out rectangle) == 0
+        int result = Shell_NotifyIconGetRect(ref icon, out rectangle);
+        LastTrayQuery = String.Format("HRESULT=0x{0:X8}; RECT=({1}, {2}, {3}, {4})",
+            result, rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom);
+        // Follow SUCCEEDED(hr), as Microsoft's NotificationIcon sample does.
+        // A nonzero success status must still provide a real icon rectangle.
+        return result >= 0
             && rectangle.Right > rectangle.Left && rectangle.Bottom > rectangle.Top;
     }
 
@@ -318,7 +325,12 @@ try {
         $Window = [WeTypeNativeSmoke]::FindOwnedWindow($Tray.Id, 'WeTypeClipboardSyncTray')
         if ($Window -ne [IntPtr]::Zero) { return $Window }
     } 'native tray controller'
-    $null = Wait-Value { [WeTypeNativeSmoke]::HasTrayIcon($Controller) } 'visible or overflow notification-area icon'
+    try {
+        $null = Wait-Value { [WeTypeNativeSmoke]::HasTrayIcon($Controller) } 'visible or overflow notification-area icon'
+    } catch {
+        throw "Notification-area verification failed: $([WeTypeNativeSmoke]::LastTrayQuery). $_"
+    }
+    Write-Host "[tray check] Native icon query: $([WeTypeNativeSmoke]::LastTrayQuery)"
     $Status = Wait-Worker
     if ($Status.poll_interval_seconds -ne 17 -or $Status.paste_trigger -ne $false) { throw 'Inspect did not report the active configuration' }
     if ($Status.proxy -notmatch '127\.0\.0\.1:1' -or $Status.proxy -notmatch 'http') { throw 'Inspect did not report the effective environment proxy' }
