@@ -28,12 +28,13 @@ cargo build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
 rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal --force-non-host
 $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
 
-cargo +1.92.0-i686-pc-windows-msvc test --locked --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
-cargo +1.92.0-i686-pc-windows-msvc test --locked --manifest-path vendor/wx-ime-sdk/Cargo.toml -p wx-ime-sdk -p wx-ime-protocol --features wx-ime-sdk/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
 ./packaging/windows/build-package.ps1 -Version 0.2.0
 ```
+
+Windows 的应用与 SDK 测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。Linux 仍额外验证独立 SDK workspace。
 
 产物位于 `dist/`。构建脚本要求编译时下载的 OpenSSL 源码许可仍位于 Cargo 缓存中。CI 额外运行 `verify-package.ps1`，需要 `RUNNER_TEMP` 指向临时目录。该脚本验证：
 

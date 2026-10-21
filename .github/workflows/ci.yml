@@ -85,10 +85,11 @@ jobs:
         shell: pwsh
         run: |
           $Toolchain = "$env:RUST_VERSION-i686-pc-windows-msvc"
-          cargo +$Toolchain test --locked --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Windows daemon tests failed' }
-          cargo +$Toolchain test --locked --manifest-path vendor/wx-ime-sdk/Cargo.toml -p wx-ime-sdk -p wx-ime-protocol --features wx-ime-sdk/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'Windows protocol tests failed' }
+          # Test the daemon and its SDK using the exact release lockfile/profile.
+          # Sharing the target directory avoids serial OpenSSL rebuilds for a
+          # second workspace and for separate debug/release profiles on MSVC.
+          cargo +$Toolchain test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows daemon and protocol tests failed' }
       - name: Build Windows x86 release
         shell: pwsh
         run: |
