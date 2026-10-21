@@ -5,6 +5,10 @@
 - Vendored at: 2026-10-12
 - License: Apache-2.0, see `LICENSE`
 - Local changes in this fork (keep this list in sync when patching):
+  - Keep only the protocol and SDK library crates. Remove the independent `wxc`
+    CLI, npm packaging/publishing scripts and nested upstream release workflows;
+    the application is built and released by this repository's Windows workflow.
+    The SDK's internal platform-specific storage protections remain unchanged.
   - `crates/wx-ime-protocol/proto/wetype.proto`: add `UnbindRequest` / `UnbindResponse`
     (command 35; field numbers read from the official 4.0.0 RN bundle decoder).
   - `crates/wx-ime-protocol/src/transport.rs`: add `UNBIND = 35`.
@@ -48,5 +52,5 @@
 
 This tree is the protocol layer (`crates/wx-ime-protocol`) and async client
 (`crates/wx-ime-sdk`) for the WeType (微信输入法) cross-device clipboard. The
-`wxclipd/` crate in this repository adds the Windows/Linux desktop integration that the
+`wxclipd/` crate in this repository adds the Windows desktop integration that the
 upstream SDK deliberately leaves out.

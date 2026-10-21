@@ -15,7 +15,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             proxy: None,
-            poll_interval_seconds: if cfg!(windows) { 10 } else { 90 },
+            poll_interval_seconds: 10,
             paste_trigger: true,
         }
     }

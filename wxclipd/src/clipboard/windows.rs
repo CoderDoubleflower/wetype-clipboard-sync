@@ -1,7 +1,9 @@
 use super::{Payload, Snapshot};
 use crate::image::{ClipboardImage, MAX_DIMENSION, MAX_ENCODED_BYTES, MAX_RGBA_BYTES};
 use anyhow::{bail, Context, Result};
-use arboard::{Clipboard, Error as ClipboardError};
+#[cfg(test)]
+use arboard::Clipboard;
+use arboard::Error as ClipboardError;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL, HWND};
@@ -28,21 +30,6 @@ const MAX_COMPARE_BYTES: usize = 32 * 1024 * 1024;
 // Allow bounded headers, palettes and color profiles in addition to pixels.
 const MAX_DIB_BYTES: usize = MAX_RGBA_BYTES as usize + 1024 * 1024;
 const DIBV5_HEADER_BYTES: usize = 124;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    Windows,
-}
-
-impl Backend {
-    pub fn detect() -> Result<Self> {
-        Ok(Self::Windows)
-    }
-
-    pub fn describe(&self) -> &'static str {
-        "windows (Unicode text / PNG / DIB images)"
-    }
-}
 
 struct ClipboardCache {
     snapshot: Option<Snapshot>,
@@ -102,7 +89,7 @@ fn png_format() -> Result<u32, ClipboardError> {
     Ok(format)
 }
 
-pub async fn read_snapshot(_backend: Backend) -> Result<Snapshot> {
+pub async fn read_snapshot() -> Result<Snapshot> {
     tokio::task::spawn_blocking(|| {
         let mut cache = CLIPBOARD_ACCESS
             .lock()
@@ -252,7 +239,6 @@ fn read_snapshot_blocking(cache: &mut ClipboardCache) -> Result<Snapshot> {
 /// Compare the revision and publish under one native lock. Never associate a
 /// later local copy's revision with the content that we just wrote.
 pub async fn write_if_unchanged(
-    _backend: Backend,
     expected: &Snapshot,
     content: &Payload,
 ) -> Result<Option<Snapshot>> {
@@ -308,6 +294,7 @@ fn refresh_written_snapshot(cache: &mut ClipboardCache, written: Snapshot) -> Sn
     written
 }
 
+#[cfg(test)]
 async fn on_clipboard<T: Send + 'static>(
     operation: impl FnMut(&mut Clipboard) -> Result<T, ClipboardError> + Send + 'static,
 ) -> Result<T> {
@@ -327,7 +314,8 @@ async fn on_clipboard<T: Send + 'static>(
     .context("Windows 剪贴板工作线程异常")?
 }
 
-pub async fn read_text(_backend: Backend) -> Result<Option<String>> {
+#[cfg(test)]
+async fn read_text() -> Result<Option<String>> {
     on_clipboard(|clipboard| match clipboard.get_text() {
         Ok(text) => Ok(Some(text)),
         Err(ClipboardError::ContentNotAvailable) => Ok(None),
@@ -336,7 +324,8 @@ pub async fn read_text(_backend: Backend) -> Result<Option<String>> {
     .await
 }
 
-pub async fn write_text(_backend: Backend, text: &str) -> Result<()> {
+#[cfg(test)]
+async fn write_text(text: &str) -> Result<()> {
     if text.contains('\0') {
         bail!("Windows 文本剪贴板不能保存 NUL 字符");
     }
@@ -344,11 +333,8 @@ pub async fn write_text(_backend: Backend, text: &str) -> Result<()> {
     on_clipboard(move |clipboard| clipboard.set_text(text.as_str())).await
 }
 
-pub async fn write_text_if_unchanged(
-    _backend: Backend,
-    expected: &Option<String>,
-    text: &str,
-) -> Result<bool> {
+#[cfg(test)]
+async fn write_text_if_unchanged(expected: &Option<String>, text: &str) -> Result<bool> {
     if text.contains('\0') {
         bail!("Windows 文本剪贴板不能保存 NUL 字符");
     }

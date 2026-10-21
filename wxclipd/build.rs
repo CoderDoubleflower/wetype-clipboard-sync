@@ -9,9 +9,11 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=assets/wetype.ico");
     println!("cargo:rerun-if-env-changed=WXCLIPD_RC");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
+    assert_eq!(
+        env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("windows"),
+        "wxclipd supports Windows only; build with a Windows MSVC target (release: i686-pc-windows-msvc)"
+    );
     assert_eq!(
         env::var("CARGO_CFG_TARGET_ENV").as_deref(),
         Ok("msvc"),

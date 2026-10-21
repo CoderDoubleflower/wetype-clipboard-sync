@@ -1,4 +1,4 @@
-//! `wxclipd`: Windows/Linux clipboard sync for the WeType (微信输入法) cross-device
+//! `wxclipd`: Windows clipboard sync for the WeType (微信输入法) cross-device
 //! clipboard group.
 
 mod clipboard;
@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use wx_ime_sdk::{Client, ClientOptions, PairingCode, PairingUpdate, ProxyConfig};
 
 const HELP: &str = "\
-wxclipd - Windows / Linux 微信输入法跨设备剪贴板
+wxclipd - Windows 微信输入法跨设备剪贴板
 
 用法:
   wxclipd [--state DIR] [--name NAME] [--proxy URL | --no-proxy] <命令>
@@ -37,14 +37,14 @@ wxclipd - Windows / Linux 微信输入法跨设备剪贴板
   sync-now          通知正在运行的 wxclipd 立即同步一次
 
 选项:
-  --state DIR       状态目录；Windows 默认 %LOCALAPPDATA%/wxclipd，Linux 默认 ~/.local/state/wxclipd
+  --state DIR       状态目录；默认 %LOCALAPPDATA%/wxclipd
   --name NAME       设备名，仅首次创建身份时使用
   --proxy URL       HTTP / SOCKS5 / SOCKS5h 代理，支持用户名密码
   --no-proxy        显式直连，不读取系统 HTTP_PROXY/HTTPS_PROXY
   --peer UIN        unbind 要解绑的设备 Uin（只有一台时可省略）
   --yes             配对时自动确认对方，不询问
   --interval MS     本地剪贴板轮询间隔，默认 400
-  --poll-interval S 远端轮询秒数 (1..3600)，Windows 默认 10，Linux 默认 90
+  --poll-interval S 远端轮询秒数 (1..3600)，默认 10
   --no-paste-trigger        关闭「Ctrl/右键触发即时拉取」（默认开启）
   --paste-trigger-debounce-ms MS  粘贴触发防抖毫秒数，默认 800
   --send-current    启动时把当前剪贴板内容发送一次
@@ -94,15 +94,12 @@ enum Command {
 
 fn main() -> Result<()> {
     let tokens: Vec<String> = std::env::args().skip(1).collect();
-    let interactive =
-        tokens.iter().any(|arg| arg == "setup") || (cfg!(windows) && tokens.is_empty());
+    let interactive = tokens.iter().any(|arg| arg == "setup") || tokens.is_empty();
     // Keep the setup presence guard through both successful and failed setup
     // prompts, including a setup window launched directly from a shortcut.
-    #[cfg(windows)]
     let mut setup_guard = None;
     let result = (|| {
         let args = parse(tokens.into_iter())?;
-        #[cfg(windows)]
         if matches!(args.command, Command::Setup) {
             setup_guard = Some(ipc::begin_setup(&args.state)?);
         }
@@ -236,13 +233,9 @@ async fn dispatch(args: Args) -> Result<()> {
         .map(ProxyConfig::parse)
         .transpose()?;
     let (client, listener) = if matches!(args.command, Command::Run { .. }) {
-        // Detect the desktop before registering a device or opening the network.
-        clipboard::Backend::detect()?;
         let mut listener = ipc::listen(&ipc::endpoint(&args.state)?)?;
         let Some(client) = open_for_run(options, &mut listener, runtime_status.clone()).await?
         else {
-            #[cfg(unix)]
-            let _ = std::fs::remove_file(ipc::endpoint(&args.state)?);
             return Ok(());
         };
         (client, Some(listener))
@@ -283,17 +276,14 @@ async fn dispatch(args: Args) -> Result<()> {
             paste_trigger,
             paste_debounce,
         } => {
-            let backend = clipboard::Backend::detect()?;
             let local_name = client.local_device().await?.name;
             runtime_status.initialized(local_name.clone());
             println!(
-                "[wxclipd] 剪贴板后端: {}，设备: {}",
-                backend.describe(),
+                "[wxclipd] Windows 剪贴板（Unicode 文本 / PNG / DIB 图片），设备: {}",
                 local_name
             );
             sync::run(
                 client.clone(),
-                backend,
                 sync::SyncOptions {
                     local_interval: interval,
                     poll_interval,
@@ -440,7 +430,6 @@ async fn setup(mut args: Args) -> Result<()> {
         result?;
         shutdown?;
     }
-    #[cfg(windows)]
     start_background(
         &args.state,
         &args.settings,
@@ -448,8 +437,6 @@ async fn setup(mut args: Args) -> Result<()> {
         args.name.as_deref(),
         true,
     )?;
-    #[cfg(not(windows))]
-    println!("设置完成，运行 wxclipd run 启动同步。");
     let _ = prompt("按 Enter 关闭设置窗口：");
     Ok(())
 }
@@ -461,44 +448,36 @@ fn start_background(
     name: Option<&str>,
     setup_complete: bool,
 ) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let launcher = std::env::current_exe()?.with_file_name("wxclipd-background.exe");
-        let mut command = std::process::Command::new(launcher);
-        command.arg("--state").arg(state);
-        if setup_complete {
-            command.env("WXCLIPD_SETUP_COMPLETE", "1");
-        } else {
-            command.env_remove("WXCLIPD_SETUP_COMPLETE");
-        }
-        // Explicit start options and setup have already saved their choice.
-        // Do not turn a saved value into a permanent environment override in
-        // the resident tray: subsequent restarts must read the updated file.
-        // A genuine environment override retains its documented precedence.
-        if proxy_source == "environment" {
-            command.env("WXCLIPD_PROXY", settings.proxy.as_deref().unwrap_or(""));
-        } else {
-            command.env_remove("WXCLIPD_PROXY");
-        }
-        if let Some(name) = name {
-            command.env("WXCLIPD_NAME", name);
-        } else {
-            command.env_remove("WXCLIPD_NAME");
-        }
-        command
-            .spawn()
-            .context("启动后台程序失败，请确认 wxclipd-background.exe 在同一目录")?;
-        println!(
-            "已打开托盘同步程序。可通过右下角图标查看运行状态与配置。日志：{}",
-            state.join("wxclipd.log").display()
-        );
-        Ok(())
+    let launcher = std::env::current_exe()?.with_file_name("wxclipd-background.exe");
+    let mut command = std::process::Command::new(launcher);
+    command.arg("--state").arg(state);
+    if setup_complete {
+        command.env("WXCLIPD_SETUP_COMPLETE", "1");
+    } else {
+        command.env_remove("WXCLIPD_SETUP_COMPLETE");
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (state, settings, proxy_source, name, setup_complete);
-        bail!("start 命令用于 Windows；Linux 请使用 wxclipd run 或 systemd 用户服务")
+    // Explicit start options and setup have already saved their choice.
+    // Do not turn a saved value into a permanent environment override in
+    // the resident tray: subsequent restarts must read the updated file.
+    // A genuine environment override retains its documented precedence.
+    if proxy_source == "environment" {
+        command.env("WXCLIPD_PROXY", settings.proxy.as_deref().unwrap_or(""));
+    } else {
+        command.env_remove("WXCLIPD_PROXY");
     }
+    if let Some(name) = name {
+        command.env("WXCLIPD_NAME", name);
+    } else {
+        command.env_remove("WXCLIPD_NAME");
+    }
+    command
+        .spawn()
+        .context("启动后台程序失败，请确认 wxclipd-background.exe 在同一目录")?;
+    println!(
+        "已打开托盘同步程序。可通过右下角图标查看运行状态与配置。日志：{}",
+        state.join("wxclipd.log").display()
+    );
+    Ok(())
 }
 
 async fn code(client: &Client, yes: bool) -> Result<()> {
@@ -815,23 +794,10 @@ fn resolve_name(state: &Path, requested: Option<String>) -> Result<String> {
     if let Some(stored) = stored_name(state)? {
         return Ok(stored);
     }
-    #[cfg(windows)]
-    {
-        return Ok(format!(
-            "{}-windows",
-            std::env::var("COMPUTERNAME").unwrap_or_else(|_| "wxclipd".into())
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        if let Ok(name) = std::fs::read_to_string("/etc/hostname") {
-            let name = name.trim();
-            if !name.is_empty() {
-                return Ok(format!("{name}-linux"));
-            }
-        }
-        Ok("wxclipd-linux".to_string())
-    }
+    Ok(format!(
+        "{}-windows",
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "wxclipd".into())
+    ))
 }
 
 fn stored_name(state: &Path) -> Result<Option<String>> {
@@ -853,20 +819,9 @@ fn default_state_dir() -> Result<PathBuf> {
     if let Some(value) = std::env::var_os("WXCLIPD_STATE") {
         return Ok(PathBuf::from(value));
     }
-    #[cfg(windows)]
-    {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .context("LOCALAPPDATA 未设置，请用 --state 指定状态目录")?;
-        return Ok(PathBuf::from(local).join("wxclipd"));
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(value) = std::env::var_os("XDG_STATE_HOME") {
-            return Ok(PathBuf::from(value).join("wxclipd"));
-        }
-        let home = std::env::var_os("HOME").context("HOME 未设置，请用 --state 指定状态目录")?;
-        Ok(PathBuf::from(home).join(".local/state/wxclipd"))
-    }
+    let local = std::env::var_os("LOCALAPPDATA")
+        .context("LOCALAPPDATA 未设置，请用 --state 指定状态目录")?;
+    Ok(PathBuf::from(local).join("wxclipd"))
 }
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -1004,7 +959,7 @@ fn parse_with_proxy_env(
             },
         });
     }
-    let setup = command == Some("setup") || (command.is_none() && cfg!(windows));
+    let setup = command == Some("setup") || command.is_none();
     let proxy_source = if proxy_override.is_some() {
         "command"
     } else if proxy_environment.is_some() {
@@ -1083,8 +1038,7 @@ fn parse_with_proxy_env(
             paste_debounce,
         },
         Some(other) => bail!("未知命令 {other}"),
-        None if cfg!(windows) => Command::Setup,
-        None => bail!("缺少命令，用 --help 查看用法"),
+        None => Command::Setup,
     };
     if !positional.is_empty() && !matches!(command, Command::Pair { .. }) {
         bail!("多余的参数: {}", positional.join(" "));

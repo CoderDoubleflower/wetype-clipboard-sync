@@ -1,4 +1,4 @@
-//! Platform clipboard backends. Network work never runs while a native
+//! Windows clipboard access. Network work never runs while a native
 //! clipboard is open.
 
 use crate::image::ClipboardImage;
@@ -13,22 +13,13 @@ pub enum Payload {
 }
 
 /// `revision` identifies every Windows clipboard change, including formats
-/// that this application does not publish. Linux tools have no such token.
+/// that this application does not publish.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub content: Option<Payload>,
     pub revision: Option<u32>,
 }
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(windows)]
 mod windows;
 
-#[cfg(target_os = "linux")]
-pub use linux::{read_snapshot, read_text, write_if_unchanged, write_text, Backend};
-#[cfg(windows)]
-pub use windows::{read_snapshot, read_text, write_if_unchanged, write_text, Backend};
-
-#[cfg(not(any(target_os = "linux", windows)))]
-compile_error!("wxclipd currently supports Windows and Linux");
+pub use windows::{read_snapshot, write_if_unchanged};

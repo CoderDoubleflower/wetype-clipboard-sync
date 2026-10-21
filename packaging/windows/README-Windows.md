@@ -1,4 +1,4 @@
-# WeType Clipboard Sync 0.4.0 · Windows 使用说明
+# WeType Clipboard Sync 0.4.1 · Windows 使用说明
 
 本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 及以上**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
 
@@ -8,8 +8,8 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| `wetype-clipboard-sync-0.4.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
-| `wetype-clipboard-sync-0.4.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
+| `wetype-clipboard-sync-0.4.1-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
+| `wetype-clipboard-sync-0.4.1-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
 安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，托盘窗口标题为 **WeType 剪贴板同步**。
 
@@ -26,9 +26,9 @@
 
 Windows 版本尚未使用真实手机账号完成端到端实测，需要在你的手机、代理和桌面会话中验证首次配对及双向同步。
 
-### 从 0.2.0 / 0.3.0 升级
+### 从 0.2.0 / 0.3.0 / 0.4.0 升级
 
-运行 0.4.0 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
+运行 0.4.1 安装包覆盖安装，安装器会停止旧版进程。配对身份和代理配置保存在状态目录中，升级会保留它们；已有配对无需重新绑定。便携版先停止同步并退出托盘，再完整解压新版覆盖程序文件。
 
 ## 托盘、状态与配置
 
@@ -224,7 +224,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 发布页同时提供 `SHA256SUMS.txt`。PowerShell 可计算下载文件的校验值，与对应行比较：
 
 ```powershell
-Get-FileHash .\wetype-clipboard-sync-0.4.0-windows-x86-setup.exe -Algorithm SHA256
+Get-FileHash .\wetype-clipboard-sync-0.4.1-windows-x86-setup.exe -Algorithm SHA256
 ```
 
-本项目是非官方协议实现，与腾讯无关联。更多源码、Linux 使用说明和许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。
+本项目是非官方协议实现，与腾讯无关联。源码与许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。

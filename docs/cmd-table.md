@@ -73,7 +73,7 @@ Java 侧另行确认了 4814/36 = `SendClipboardMsgReq`（`candidate/a0.java:141
 | 8 | FunctionSwitchVoiceRecap |
 
 `SetGroupFuncSwitchReq{uin, platform, groupId, funcSwitch}` 由官方设置页“跨设备粘贴”开关触发。
-官方发送剪贴板前会检查组里是否已开启 Clipboard 位；本仓库的 Linux 客户端不做该检查，
+官方发送剪贴板前会检查组里是否已开启 Clipboard 位；本项目客户端不做该检查，
 但正式使用前建议在手机端把“跨设备粘贴/剪贴板同步”打开。
 
 `GroupRequest.filter` 位（官方 JS 的 `Filter` 枚举）：`0=None`、`1=BoundList`、`2=Clipboard`、

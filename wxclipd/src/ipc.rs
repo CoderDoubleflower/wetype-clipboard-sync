@@ -5,19 +5,9 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(windows)]
 mod windows;
 
-#[cfg(target_os = "linux")]
-use linux as platform;
-#[cfg(windows)]
-use windows as platform;
-
-pub use platform::{endpoint, listen, prepare_state_dir, Listener};
-#[cfg(windows)]
-pub use windows::{begin_setup, setup_in_progress};
+pub use windows::{begin_setup, endpoint, listen, prepare_state_dir, setup_in_progress, Listener};
 
 pub trait ControlStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> ControlStream for T {}
@@ -37,7 +27,7 @@ pub async fn call(state: &Path, command: &str) -> Result<Option<String>> {
         bail!("控制命令必须是 1–255 字节的单行文本");
     }
     let path = endpoint(state)?;
-    let connection = tokio::time::timeout(Duration::from_secs(2), platform::connect(&path))
+    let connection = tokio::time::timeout(Duration::from_secs(2), windows::connect(&path))
         .await
         .context("连接正在运行的 wxclipd 超时")??;
     let Some(mut stream) = connection else {
@@ -84,7 +74,7 @@ pub async fn stop_and_wait(state: &Path) -> Result<bool> {
     if pid == 0 || pid == std::process::id() {
         bail!("后台返回了无效进程 ID");
     }
-    let Some(process) = platform::watch_process(pid)? else {
+    let Some(process) = windows::watch_process(pid)? else {
         // The observed daemon exited between ping and acquiring the handle.
         return Ok(true);
     };
@@ -94,7 +84,7 @@ pub async fn stop_and_wait(state: &Path) -> Result<bool> {
         .and_then(|result| result);
     // Even if the response connection closed during shutdown, a signalled
     // process handle proves that stopping succeeded.
-    match platform::wait_for_exit(process, state).await {
+    match windows::wait_for_exit(process, state).await {
         Ok(()) => Ok(true),
         Err(wait_error) => {
             request.context("无法通知后台停止")?;
@@ -138,21 +128,14 @@ mod tests {
         let mut listener = listen(&path).unwrap();
         assert!(listen(&path).is_err());
         let server = tokio::spawn(async move {
-            // On Unix the duplicate-listener probe opened a connection and
-            // closed without sending a command. Ignore that empty connection.
-            loop {
-                let stream = listener.accept().await.unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut command = String::new();
-                if reader.read_line(&mut command).await.unwrap() == 0 {
-                    continue;
-                }
-                assert_eq!(command, "ping\n");
-                let mut stream = reader.into_inner();
-                stream.write_all("ok 中文🙂\n".as_bytes()).await.unwrap();
-                stream.shutdown().await.unwrap();
-                break;
-            }
+            let stream = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "ping\n");
+            let mut stream = reader.into_inner();
+            stream.write_all("ok 中文🙂\n".as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
         });
         assert_eq!(
             call(&directory.0, "ping").await.unwrap().as_deref(),

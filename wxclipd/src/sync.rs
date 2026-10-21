@@ -6,7 +6,7 @@
 
 mod state;
 
-use crate::clipboard::{self, Backend, Payload};
+use crate::clipboard::{self, Payload};
 use crate::runtime_status::{LocalOperation, RuntimeStatus};
 use anyhow::{anyhow, Context, Result};
 use state::{PublishFailure, ReceiptPhase, Retry, State};
@@ -77,7 +77,6 @@ enum PrepareFailure {
 
 pub async fn run(
     client: Client,
-    backend: Backend,
     options: SyncOptions,
     control: PathBuf,
     listener: Option<crate::ipc::Listener>,
@@ -97,19 +96,6 @@ pub async fn run(
         "[wxclipd] 控制端点: {}（sync-now 立即同步，stop 停止）",
         control.display()
     );
-
-    // Unix signals are translated into the same explicit manual action as IPC.
-    #[cfg(unix)]
-    let signal_task = {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut trigger = signal(SignalKind::user_defined1())?;
-        let notify = notify.clone();
-        tokio::spawn(async move {
-            while trigger.recv().await.is_some() {
-                notify.notify_one();
-            }
-        })
-    };
 
     let (commands, command_rx) = mpsc::channel(1);
     let (results, mut result_rx) = mpsc::channel(1);
@@ -258,12 +244,12 @@ pub async fn run(
                 }
             }
             _ = local_tick.tick() => {
-                observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await;
+                observe_clipboard(&mut state, &mut read_failed, &runtime_status).await;
             }
             _ = notify.notified() => {
                 // Observe first so an explicit retry never republishes a value
                 // that the user replaced since the last periodic observation.
-                if observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await {
+                if observe_clipboard(&mut state, &mut read_failed, &runtime_status).await {
                     state.force_retry(Instant::now());
                 }
                 poll_requested = true;
@@ -277,7 +263,7 @@ pub async fn run(
         }
 
         if state.apply_due(Instant::now()) {
-            apply_incoming(backend, &mut state, &mut read_failed, &runtime_status).await;
+            apply_incoming(&mut state, &mut read_failed, &runtime_status).await;
         }
         update_local_status(&runtime_status, &state);
         if in_flight || state.observed.is_none() {
@@ -290,7 +276,7 @@ pub async fn run(
             // A retry may be due between local timer ticks, or after a long
             // clipboard read failure. Never resend an obsolete observation
             // without first checking what the user currently has copied.
-            if !observe_clipboard(backend, &mut state, &mut read_failed, &runtime_status).await {
+            if !observe_clipboard(&mut state, &mut read_failed, &runtime_status).await {
                 continue;
             }
         }
@@ -337,12 +323,6 @@ pub async fn run(
     let _ = control_task.await;
     let _ = network_task.await;
     let _ = push_task.await;
-    #[cfg(unix)]
-    {
-        signal_task.abort();
-        let _ = signal_task.await;
-        let _ = std::fs::remove_file(&control);
-    }
     outcome
 }
 
@@ -372,12 +352,11 @@ fn update_local_status(runtime_status: &RuntimeStatus, state: &State) {
 }
 
 async fn observe_clipboard(
-    backend: Backend,
     state: &mut State,
     read_failed: &mut bool,
     runtime_status: &RuntimeStatus,
 ) -> bool {
-    match clipboard::read_snapshot(backend).await {
+    match clipboard::read_snapshot().await {
         Ok(snapshot) => {
             runtime_status.local_result(LocalOperation::Read, true);
             *read_failed = false;
@@ -401,15 +380,10 @@ async fn observe_clipboard(
     }
 }
 
-async fn apply_incoming(
-    backend: Backend,
-    state: &mut State,
-    read_failed: &mut bool,
-    runtime_status: &RuntimeStatus,
-) {
+async fn apply_incoming(state: &mut State, read_failed: &mut bool, runtime_status: &RuntimeStatus) {
     // A fresh read catches copies made after the last timer tick. On Windows the
     // conditional write rechecks under the same clipboard lock as the write.
-    if !observe_clipboard(backend, state, read_failed, runtime_status).await {
+    if !observe_clipboard(state, read_failed, runtime_status).await {
         state.incoming_failed(Instant::now());
         return;
     }
@@ -431,7 +405,7 @@ async fn apply_incoming(
         .as_ref()
         .expect("clipboard was observed")
         .clone();
-    match clipboard::write_if_unchanged(backend, &expected, &payload).await {
+    match clipboard::write_if_unchanged(&expected, &payload).await {
         Ok(Some(written)) => {
             runtime_status.received();
             state.applied(written, Instant::now());
@@ -442,7 +416,7 @@ async fn apply_incoming(
         }
         Ok(None) => {
             state.discard_incoming(Instant::now());
-            observe_clipboard(backend, state, read_failed, runtime_status).await;
+            observe_clipboard(state, read_failed, runtime_status).await;
             println!("[wxclipd] 写入前发现本机剪贴板已更新，已保留本机内容");
         }
         Err(error) => {

@@ -138,7 +138,7 @@ function Invoke-Program([string]$Executable, [string[]]$Arguments = @(), [int]$T
         $ErrorTask = $Process.StandardError.ReadToEndAsync()
     }
     if (-not $Process.WaitForExit($Timeout)) {
-        $Process.Kill()
+        $Process.Kill($true)
         throw "Program timed out: $Executable"
     }
     if ($Capture) {
@@ -267,9 +267,9 @@ try {
         paste_trigger = $false
     } | ConvertTo-Json | Set-Content (Join-Path $TestState 'config.json') -Encoding utf8
 
-    # Verify the previous real release, including its lack of --quit support.
-    $OldInstaller = Join-Path $env:RUNNER_TEMP 'wetype-clipboard-sync-0.3.0-windows-x86-setup.exe'
-    Write-Host '[tray check] Obtaining the pinned 0.3.0 installer (45 second download deadline).'
+    # Verify an upgrade from the previous real release with its resident tray.
+    $OldInstaller = Join-Path $env:RUNNER_TEMP 'wetype-clipboard-sync-0.4.0-windows-x86-setup.exe'
+    Write-Host '[tray check] Obtaining the pinned 0.4.0 installer (45 second download deadline).'
     if (-not (Test-Path $OldInstaller)) {
         $Http = [Net.Http.HttpClient]::new()
         $Http.Timeout = [TimeSpan]::FromSeconds(45)
@@ -277,27 +277,27 @@ try {
         try {
             # GetByteArrayAsync buffers the complete response, so HttpClient's
             # timeout covers both connection and body, including redirects.
-            $Download = $Http.GetByteArrayAsync('https://github.com/CoderDoubleflower/wetype-clipboard-sync/releases/download/v0.3.0/wetype-clipboard-sync-0.3.0-windows-x86-setup.exe')
+            $Download = $Http.GetByteArrayAsync('https://github.com/CoderDoubleflower/wetype-clipboard-sync/releases/download/v0.4.0/wetype-clipboard-sync-0.4.0-windows-x86-setup.exe')
             [IO.File]::WriteAllBytes($OldInstaller, $Download.GetAwaiter().GetResult())
         } finally { $Http.Dispose() }
     }
-    if ((Get-FileHash $OldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'fde703a92f4a95a9604b13289bade5121807cde800eab546149d577c3796a8a5') {
+    if ((Get-FileHash $OldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne '7f39c705309b2dbb311d6f273582804bc9302daa677ee2eeaff2c12cd570778f') {
         throw 'Previous release checksum mismatch'
     }
-    Write-Host '[tray check] Installing 0.3.0 and starting its offline background worker.'
+    Write-Host '[tray check] Installing 0.4.0 and starting its resident tray and offline worker.'
     $null = Invoke-Program $OldInstaller $InstallArguments 60000
-    $null = Invoke-Program $InstalledTray
+    $OldTray = Start-OwnedProcess $InstalledTray
     $OldDaemon = Wait-Value {
         $Candidates = @(Get-Process -Name wxclipd -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $InstalledCli })
         if ($Candidates.Count -eq 1 -and (Test-Path (Join-Path $TestState 'identity.json'))) { return $Candidates[0] }
-    } '0.3 worker startup'
+    } '0.4.0 worker startup'
     $null = $OldDaemon.Handle
     $OwnedProcesses.Add($OldDaemon)
     $IdentityHash = (Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash
     $ConfigHash = (Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash
-    Write-Host '[tray check] Upgrading the running 0.3.0 installation and checking retained identity/configuration.'
+    Write-Host '[tray check] Upgrading the running 0.4.0 installation and checking retained identity/configuration.'
     $null = Invoke-Program $Installer $InstallArguments 60000
-    if (-not $OldDaemon.WaitForExit(10000)) { throw 'Upgrade left the 0.3 worker running' }
+    if (-not $OldTray.WaitForExit(10000) -or -not $OldDaemon.WaitForExit(10000)) { throw 'Upgrade left the 0.4.0 tray or worker running' }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Upgrade replaced the existing identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Upgrade changed the saved configuration' }
     $VersionOutput = Invoke-Program $InstalledCli @('--version') -Capture
@@ -403,7 +403,7 @@ try {
     }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Uninstall removed/replaced the retained identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Uninstall removed/changed the retained configuration' }
-    Write-Output 'Native tray verification passed: icon resources, 0.3 upgrade, configuration redaction, status window, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
+    Write-Output 'Native tray verification passed: icon resources, 0.4.0 upgrade, configuration redaction, status window, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
 } finally {
     Write-Host '[tray check] Cleaning up isolated test processes and restoring environment.'
     # Only processes created or identified within this isolated installation
@@ -411,7 +411,7 @@ try {
     foreach ($Process in $OwnedProcesses) {
         try {
             if (-not $Process.HasExited) {
-                $Process.Kill()
+                $Process.Kill($true)
                 $null = $Process.WaitForExit(5000)
             }
         } catch { Write-Warning "Test process cleanup failed: $_" }

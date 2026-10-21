@@ -1,5 +1,0 @@
-# 让活跃本地会话的用户临时拿到输入设备 ACL，供 wxclipd 监听 Ctrl/鼠标右键
-# 以触发「马上要粘贴」的即时同步。只在会话活跃时生效，不把用户加入 input 组。
-SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
-SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"
-SUBSYSTEM=="input", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="uaccess"

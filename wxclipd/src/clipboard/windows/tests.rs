@@ -4,7 +4,6 @@ use std::sync::{mpsc, MutexGuard};
 
 pub(super) static IMAGE_DECODES: AtomicUsize = AtomicUsize::new(0);
 static NATIVE_TEST_ACCESS: Mutex<()> = Mutex::new(());
-const BACKEND: Backend = Backend::Windows;
 
 // Serialize whole native test cases, not just individual API calls, and restore
 // a supported clipboard value even when an assertion unwinds the test.
@@ -18,7 +17,7 @@ impl RestoreClipboard {
         let exclusive = NATIVE_TEST_ACCESS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = read_snapshot(BACKEND).await.unwrap().content;
+        let original = read_snapshot().await.unwrap().content;
         Self {
             _exclusive: exclusive,
             original,
@@ -130,25 +129,22 @@ fn native_bytes(format: u32) -> Vec<u8> {
 async fn native_unicode_roundtrip_and_compare_exchange_preserve_local_copy() {
     let _restore = RestoreClipboard::capture().await;
     let first = "wxclipd Windows 测试 🙂\r\n第二行";
-    write_text(BACKEND, first).await.unwrap();
-    assert_eq!(read_text(BACKEND).await.unwrap().as_deref(), Some(first));
+    write_text(first).await.unwrap();
+    assert_eq!(read_text().await.unwrap().as_deref(), Some(first));
     assert!(
-        write_text_if_unchanged(BACKEND, &Some(first.to_owned()), "远端文本 ✅")
+        write_text_if_unchanged(&Some(first.to_owned()), "远端文本 ✅")
+            .await
+            .unwrap()
+    );
+    assert_eq!(read_text().await.unwrap().as_deref(), Some("远端文本 ✅"));
+    write_text("用户刚复制的内容").await.unwrap();
+    assert!(
+        !write_text_if_unchanged(&Some(first.to_owned()), "过期远端值")
             .await
             .unwrap()
     );
     assert_eq!(
-        read_text(BACKEND).await.unwrap().as_deref(),
-        Some("远端文本 ✅")
-    );
-    write_text(BACKEND, "用户刚复制的内容").await.unwrap();
-    assert!(
-        !write_text_if_unchanged(BACKEND, &Some(first.to_owned()), "过期远端值")
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        read_text(BACKEND).await.unwrap().as_deref(),
+        read_text().await.unwrap().as_deref(),
         Some("用户刚复制的内容")
     );
 }
@@ -157,8 +153,8 @@ async fn native_unicode_roundtrip_and_compare_exchange_preserve_local_copy() {
 async fn native_image_roundtrip_preserves_transparency_and_populates_write_cache() {
     let _restore = RestoreClipboard::capture().await;
     let pixels = fixture_image();
-    let expected = read_snapshot(BACKEND).await.unwrap();
-    let written = write_if_unchanged(BACKEND, &expected, &Payload::Image(pixels.clone()))
+    let expected = read_snapshot().await.unwrap();
+    let written = write_if_unchanged(&expected, &Payload::Image(pixels.clone()))
         .await
         .unwrap()
         .unwrap();
@@ -166,7 +162,7 @@ async fn native_image_roundtrip_preserves_transparency_and_populates_write_cache
     // CloseClipboard may synthesize bitmap formats. That one-time revision
     // change is resolved before returning; subsequent polls must reuse pixels.
     let decodes = IMAGE_DECODES.load(Ordering::Relaxed);
-    let cached = read_snapshot(BACKEND).await.unwrap();
+    let cached = read_snapshot().await.unwrap();
     assert_eq!(cached, written);
     assert!(Arc::ptr_eq(image(&cached), &pixels));
     assert_eq!(IMAGE_DECODES.load(Ordering::Relaxed), decodes);
@@ -183,7 +179,7 @@ async fn native_image_roundtrip_preserves_transparency_and_populates_write_cache
         pixels.rgba().unwrap()
     );
     clear_cache();
-    let reread = read_snapshot(BACKEND).await.unwrap();
+    let reread = read_snapshot().await.unwrap();
     assert_eq!(image(&reread).rgba().unwrap(), pixels.rgba().unwrap());
     assert_eq!(reread.content, written.content);
 }
@@ -202,8 +198,8 @@ async fn native_jpeg_payload_uses_dibv5_without_requiring_png() {
         .unwrap();
     let received = Arc::new(ClipboardImage::from_encoded(&jpeg).unwrap());
     assert!(received.png().is_none());
-    let expected = read_snapshot(BACKEND).await.unwrap();
-    let written = write_if_unchanged(BACKEND, &expected, &Payload::Image(received.clone()))
+    let expected = read_snapshot().await.unwrap();
+    let written = write_if_unchanged(&expected, &Payload::Image(received.clone()))
         .await
         .unwrap()
         .unwrap();
@@ -219,10 +215,7 @@ async fn native_jpeg_payload_uses_dibv5_without_requiring_png() {
         received.rgba().unwrap()
     );
     clear_cache();
-    assert_eq!(
-        read_snapshot(BACKEND).await.unwrap().content,
-        written.content
-    );
+    assert_eq!(read_snapshot().await.unwrap().content, written.content);
 }
 
 #[tokio::test]
@@ -237,9 +230,7 @@ async fn native_png_dibv5_and_legacy_dib_take_priority_over_text() {
         ),
     ]);
     assert_eq!(
-        image(&read_snapshot(BACKEND).await.unwrap())
-            .rgba()
-            .unwrap(),
+        image(&read_snapshot().await.unwrap()).rgba().unwrap(),
         pixels.rgba().unwrap()
     );
 
@@ -250,9 +241,7 @@ async fn native_png_dibv5_and_legacy_dib_take_priority_over_text() {
         (CF_UNICODETEXT, text_bytes("accompanying browser text")),
     ]);
     assert_eq!(
-        image(&read_snapshot(BACKEND).await.unwrap())
-            .rgba()
-            .unwrap(),
+        image(&read_snapshot().await.unwrap()).rgba().unwrap(),
         pixels.rgba().unwrap()
     );
 
@@ -271,9 +260,7 @@ async fn native_png_dibv5_and_legacy_dib_take_priority_over_text() {
         (CF_UNICODETEXT, text_bytes("not image data")),
     ]);
     assert_eq!(
-        image(&read_snapshot(BACKEND).await.unwrap())
-            .rgba()
-            .unwrap(),
+        image(&read_snapshot().await.unwrap()).rgba().unwrap(),
         vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]
     );
 }
@@ -287,9 +274,9 @@ async fn native_image_reads_reuse_sequence_cache_instead_of_decoding_again() {
         pixels.png().unwrap().to_vec(),
     )]);
     let before = IMAGE_DECODES.load(Ordering::Relaxed);
-    let first = read_snapshot(BACKEND).await.unwrap();
+    let first = read_snapshot().await.unwrap();
     for _ in 0..8 {
-        let next = read_snapshot(BACKEND).await.unwrap();
+        let next = read_snapshot().await.unwrap();
         assert_eq!(next.revision, first.revision);
         assert!(Arc::ptr_eq(image(&first), image(&next)));
     }
@@ -299,65 +286,58 @@ async fn native_image_reads_reuse_sequence_cache_instead_of_decoding_again() {
 #[tokio::test]
 async fn native_text_and_image_changes_invalidate_old_revisions() {
     let _restore = RestoreClipboard::capture().await;
-    write_text(BACKEND, "first text").await.unwrap();
-    let text = read_snapshot(BACKEND).await.unwrap();
+    write_text("first text").await.unwrap();
+    let text = read_snapshot().await.unwrap();
     let payload = Payload::Image(fixture_image());
-    let image_snapshot = write_if_unchanged(BACKEND, &text, &payload)
-        .await
-        .unwrap()
-        .unwrap();
+    let image_snapshot = write_if_unchanged(&text, &payload).await.unwrap().unwrap();
     assert!(
-        write_if_unchanged(BACKEND, &text, &Payload::Text("stale remote text".into()))
+        write_if_unchanged(&text, &Payload::Text("stale remote text".into()))
             .await
             .unwrap()
             .is_none()
     );
-    assert!(
-        !write_text_if_unchanged(BACKEND, &None, "stale text-only writer")
-            .await
-            .unwrap()
-    );
+    assert!(!write_text_if_unchanged(&None, "stale text-only writer")
+        .await
+        .unwrap());
     assert_eq!(
-        read_snapshot(BACKEND).await.unwrap().content,
+        read_snapshot().await.unwrap().content,
         image_snapshot.content
     );
 
-    write_text(BACKEND, "new local text").await.unwrap();
-    assert!(write_if_unchanged(BACKEND, &image_snapshot, &payload)
+    write_text("new local text").await.unwrap();
+    assert!(write_if_unchanged(&image_snapshot, &payload)
         .await
         .unwrap()
         .is_none());
-    let before_recopy = read_snapshot(BACKEND).await.unwrap();
-    write_text(BACKEND, "new local text").await.unwrap();
-    let after_recopy = read_snapshot(BACKEND).await.unwrap();
+    let before_recopy = read_snapshot().await.unwrap();
+    write_text("new local text").await.unwrap();
+    let after_recopy = read_snapshot().await.unwrap();
     assert_eq!(before_recopy.content, after_recopy.content);
     assert_ne!(before_recopy.revision, after_recopy.revision);
-    assert!(write_if_unchanged(BACKEND, &before_recopy, &payload)
+    assert!(write_if_unchanged(&before_recopy, &payload)
         .await
         .unwrap()
         .is_none());
-    assert!(write_if_unchanged(
-        BACKEND,
-        &after_recopy,
-        &Payload::Text("invalid\0text".into())
-    )
-    .await
-    .is_err());
-    assert_eq!(read_snapshot(BACKEND).await.unwrap(), after_recopy);
+    assert!(
+        write_if_unchanged(&after_recopy, &Payload::Text("invalid\0text".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(read_snapshot().await.unwrap(), after_recopy);
 }
 
 #[tokio::test]
 async fn native_post_write_refresh_preserves_a_new_local_copys_revision() {
     let _restore = RestoreClipboard::capture().await;
-    let expected = read_snapshot(BACKEND).await.unwrap();
-    let written = write_if_unchanged(BACKEND, &expected, &Payload::Image(fixture_image()))
+    let expected = read_snapshot().await.unwrap();
+    let written = write_if_unchanged(&expected, &Payload::Image(fixture_image()))
         .await
         .unwrap()
         .unwrap();
     // Reproduce a local copy in the gap after CloseClipboard, before the
     // write's final revision/cache refresh. The newer revision must never be
     // attached to the old remote image or used to overwrite the local text.
-    write_text(BACKEND, "copied immediately after remote image")
+    write_text("copied immediately after remote image")
         .await
         .unwrap();
     let mut cache = CLIPBOARD_ACCESS.lock().unwrap();
@@ -384,13 +364,13 @@ async fn native_unsupported_image_is_cached_without_blocking_future_receives() {
         ),
     ]);
     let before = IMAGE_DECODES.load(Ordering::Relaxed);
-    let unsupported = read_snapshot(BACKEND).await.unwrap();
+    let unsupported = read_snapshot().await.unwrap();
     assert!(unsupported.content.is_none());
     assert!(unsupported.revision.is_some());
-    assert_eq!(read_snapshot(BACKEND).await.unwrap(), unsupported);
+    assert_eq!(read_snapshot().await.unwrap(), unsupported);
     assert_eq!(IMAGE_DECODES.load(Ordering::Relaxed), before + 1);
     assert!(
-        write_if_unchanged(BACKEND, &unsupported, &Payload::Image(fixture_image()))
+        write_if_unchanged(&unsupported, &Payload::Image(fixture_image()))
             .await
             .unwrap()
             .is_some()
@@ -400,8 +380,8 @@ async fn native_unsupported_image_is_cached_without_blocking_future_receives() {
 #[tokio::test]
 async fn native_occupied_clipboard_returns_error_and_retry_preserves_new_local_copy() {
     let _restore = RestoreClipboard::capture().await;
-    write_text(BACKEND, "before lock").await.unwrap();
-    let expected = read_snapshot(BACKEND).await.unwrap();
+    write_text("before lock").await.unwrap();
+    let expected = read_snapshot().await.unwrap();
     clear_cache();
     let (ready_tx, ready_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -421,7 +401,7 @@ async fn native_occupied_clipboard_returns_error_and_retry_preserves_new_local_c
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let started = Instant::now();
-    assert!(read_snapshot(BACKEND).await.is_err());
+    assert!(read_snapshot().await.is_err());
     // A refresh after a committed write is best effort. Temporary occupancy
     // cannot retroactively report the successful write as an error.
     assert_eq!(
@@ -453,14 +433,14 @@ async fn native_occupied_clipboard_returns_error_and_retry_preserves_new_local_c
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(
-        write_if_unchanged(BACKEND, &expected, &Payload::Image(fixture_image()))
+        write_if_unchanged(&expected, &Payload::Image(fixture_image()))
             .await
             .unwrap()
             .is_none()
     );
     copier.join().unwrap();
     assert_eq!(
-        read_snapshot(BACKEND).await.unwrap().content,
+        read_snapshot().await.unwrap().content,
         Some(Payload::Text("copied while remote write waited".into()))
     );
 }

@@ -1,7 +1,2 @@
 /target/
-.wxc/
-.wx-ime-cli/
 *.env
-/npm-dist/
-/npm-smoke/
-*.tgz

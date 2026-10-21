@@ -33,7 +33,7 @@ foreach ($Exe in @($Cli, $Launcher)) {
     }
 }
 
-# Native UI/lifecycle checks include an upgrade from the published 0.3 package.
+# Native UI/lifecycle checks include an upgrade from the published 0.4.0 package.
 & (Join-Path $PSScriptRoot 'verify-tray.ps1') -Version $Version -Dist $Dist
 if ($LASTEXITCODE -ne 0) { throw 'Native tray/package verification failed' }
 Write-Output 'Verified x86 PE32 executables, static runtime dependencies, version, icon resources, native tray/status UI, offline configuration, upgrade, lifecycle and uninstall.'

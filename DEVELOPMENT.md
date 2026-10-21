@@ -2,47 +2,36 @@
 
 ## 构建范围
 
-项目由 `wxclipd/` 应用和 `vendor/wx-ime-sdk/` 独立 Cargo workspace 组成，各自使用自己的 `Cargo.lock`。Rust 最低版本为 1.92。Windows 发布目标是 **i686-pc-windows-msvc（32 位 x86）**，Linux 保留 Wayland/X11 支持。
+项目仅支持 Windows，由 `wxclipd/` 应用和 `vendor/wx-ime-sdk/` 协议 workspace 组成。协议 workspace 仅保留 `wx-ime-sdk` 与 `wx-ime-protocol` 两个库；应用与协议 workspace 分别维护 `Cargo.lock`，固定各自的依赖解析。Rust 最低版本为 1.92，发布目标为 **i686-pc-windows-msvc（32 位 x86）**。
 
 协议中的 `secp128r1` 运算继续使用 OpenSSL；HTTPS/WSS 的 TLS 使用 Rustls。Windows 使用 `vendored-openssl` 从源码静态构建 OpenSSL，并静态链接 MSVC CRT，用户无需另装 OpenSSL 或 VC++ Redistributable。不要把协议曲线替换成另一种算法。
 
-## Linux
-
-```sh
-sudo apt install protobuf-compiler libssl-dev pkg-config wl-clipboard
-# X11 桌面用 xclip 代替 wl-clipboard。
-cargo test --locked --manifest-path wxclipd/Cargo.toml
-cargo test --locked --workspace --manifest-path vendor/wx-ime-sdk/Cargo.toml
-cargo build --locked --release --manifest-path wxclipd/Cargo.toml --bin wxclipd
-```
-
-系统 OpenSSL 需要支持 `secp128r1`，可以用 `openssl ecparam -list_curves` 检查。也可启用 `--features vendored-openssl`，这需要 C 编译器、Perl 和 Make。
-
-## Windows x86
+## 构建 Windows x86
 
 需要 Visual Studio 2022 C++ Build Tools、Windows SDK、Rustup、Perl、NASM、protoc 29.3 和 Inno Setup 6。在 **x86 Native Tools Command Prompt** 中启动 PowerShell，确保这些工具在 PATH 内。
 
 使用 i686 主机工具链，使 OpenSSL 的构建脚本和目标程序都使用同一种 CPU 架构：
 
 ```powershell
-rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal --force-non-host
+rustup toolchain install 1.92.0-i686-pc-windows-msvc --profile minimal --component rustfmt --force-non-host
 $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
 
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.4.0
+./packaging/windows/build-package.ps1 -Version 0.4.1
 ```
 
-Windows 的应用与 SDK 测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。Linux 仍额外验证独立 SDK workspace。
+应用、SDK 和协议测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。SDK 不再附带独立 CLI、npm 包及其分发脚本。
 
 产物位于 `dist/`。构建脚本要求编译时下载的 OpenSSL 源码许可仍位于 Cargo 缓存中。CI 额外运行 `verify-package.ps1`，需要 `RUNNER_TEMP` 指向临时目录。该脚本验证：
 
-- CLI、后台启动器和安装器为 x86 PE32；CLI/启动器的 Windows 子系统设置正确。
+- CLI、托盘程序和安装器为 x86 PE32；CLI/托盘程序的 Windows 子系统设置正确。
 - release 可执行文件可以运行，版本标识为 `windows-x86`。
 - 不依赖 OpenSSL 或 MSVC C++ 动态运行库。
 - 可执行文件与安装器包含微信输入法图标，资源版本与 Cargo 版本一致。
 - 当前用户模式安装、常驻托盘、状态窗口、单实例、后台启停、旧版本升级与运行中卸载能够完成。
+- 升级基准为已发布且校验 SHA-256 的 0.4.0 安装包：启动其常驻托盘及同步进程后安装新版，确认旧进程退出，并保留配对身份与配置。
 
 Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此用单测试线程运行。CI 在 Windows Server 2022 的 x64 主机上执行 x86 程序；这不是对每种 32 位 Windows 设备的实机覆盖。
 
@@ -55,10 +44,10 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 | `wxclipd/src/tray.rs` | 常驻托盘、状态窗口、后台进程管理与日志入口 |
 | `wxclipd/src/runtime_status.rs` | 本地运行快照、收发计数与凭据安全的状态输出 |
 | `wxclipd/src/config.rs` | 配置验证与原子保存 |
-| `wxclipd/src/clipboard/` | Win32 剪贴板和 Wayland/X11 后端 |
+| `wxclipd/src/clipboard/` | Win32 剪贴板读写与原生测试 |
 | `wxclipd/src/image.rs` | 有界图片解码、PNG/JPEG 编码、像素指纹与接收缓存校验 |
-| `wxclipd/src/input_watch/` | Windows 输入 hooks、Linux evdev 触发 |
-| `wxclipd/src/ipc/` | Windows Named Pipe、Linux Unix socket |
+| `wxclipd/src/input_watch/` | Windows 键盘与鼠标输入 hooks |
+| `wxclipd/src/ipc/` | Windows Named Pipe 与当前用户访问控制 |
 | `wxclipd/src/sync.rs` | 本地观察、网络 worker、控制命令 |
 | `wxclipd/src/sync/state.rs` | 最新值队列、receipt/ack 与冲突状态机 |
 | `vendor/wx-ime-sdk/crates/wx-ime-sdk/src/network.rs` | HTTP/SOCKS 路由与 WebSocket 隧道 |
@@ -75,9 +64,9 @@ HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码�
 
 ## 状态与本地控制
 
-Windows 默认状态目录是 `%LOCALAPPDATA%\wxclipd`；Linux 是 `$XDG_STATE_HOME/wxclipd` 或 `~/.local/state/wxclipd`。测试使用独立 `--state` 目录。身份私钥和待确认 receipt 存在此处；同一个目录只能有一个同步进程。
+默认状态目录是 `%LOCALAPPDATA%\wxclipd`。测试使用独立 `--state` 目录。身份私钥和待确认 receipt 存在此处；同一个目录只能有一个同步进程。
 
-Windows 状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒绝远程 Named Pipe 客户端。Linux 目录为 0700，socket 为 0600。
+状态目录与 Named Pipe 仅允许当前用户及 SYSTEM 访问，拒绝远程 Named Pipe 客户端。
 
 控制协议每行一个请求，最多 255 字节，回应也按换行分帧：
 
@@ -101,13 +90,13 @@ Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shel
 
 ## 同步状态约定
 
-本地默认每 400 ms 观察一次，独立于网络请求。远端默认 Windows 10 秒、Linux 90 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
+本地默认每 400 ms 观察一次，独立于网络请求。远端默认每 10 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
 
 出站只保留最新待发文本或图片，不是历史队列。明确网络失败会退避重试；发送期间新复制内容取代旧待发内容。SDK 返回 `OutcomeUnknown` 时保留待发内容但不自动重发，可由 `sync-now` 重试当前内容，或通过新内容恢复发送；同一内容仅序列号变化不会解除暂停。出站队列不跨进程重启持久化。
 
-入站持有完整 receipt，图片先在 blocking worker 中检查缓存长度/哈希并解码，再应用到剪贴板。写入成功后才确认；确认失败只重试确认，不重复覆盖。Windows 在同一次剪贴板锁内比较序列号和写入新值，保护刚发生的本地复制，包括重新复制同一内容。Linux 外部剪贴板命令只能做最后一次重新读取检查，不能提供同样的原子保证。
+入站持有完整 receipt，图片先在 blocking worker 中检查缓存长度/哈希并解码，再应用到剪贴板。写入成功后才确认；确认失败只重试确认，不重复覆盖。在同一次 Win32 剪贴板锁内比较序列号和写入新值，保护刚发生的本地复制，包括重新复制同一内容。
 
-本地输入监听代码只用 Ctrl/鼠标右键触发拉取。Linux 的 `60-wxclipd-input.rules` 需早于 systemd 的 `73-seat-late.rules` 生效，以便 `uaccess` 授予活跃会话权限。
+本地输入 hooks 只将 Ctrl/鼠标右键转换为提前拉取提示，不记录用户输入。
 
 图片快照通过 `Arc` 共享，比较尺寸及 RGBA 的 SHA-256；Windows 按剪贴板序列号缓存解码结果。识别顺序为 PNG、DIBV5、DIB、文本。网络图片上限 16 MiB，解码像素上限 64 MiB RGBA、每边 16384；decoder 另有分配限制。保留 JPEG 编码，位图默认 PNG，超限时仅不透明图片可降为 JPEG 95/90。有限长度 writer 必须检查编码器返回值和 writer 的溢出、分配失败状态：PNG 的最终 IEND 写入可发生在 Drop 中。
 
@@ -117,15 +106,15 @@ Windows 的 `wxclipd-background.exe` 为常驻 GUI 子系统进程，负责 Shel
 
 ## 测试与发布
 
-`.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上构建并测试 Linux/Windows。Windows 测试包含真实文本/图片剪贴板、透明度、占用与序列冲突、本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时、WSS 握手，以及受信本地 TLS 下的加密 COS 图片 PUT/GET 逐字节往返，不依赖用户手机号或配对状态。
+`.github/workflows/ci.yml` 在 feature 分支、PR 和 main 上执行 Windows 格式检查、构建与测试。测试包含真实文本/图片剪贴板、透明度、占用与序列冲突、本地 IPC；代理测试用本地模拟 HTTP/SOCKS 服务器验证认证、DNS 模式、拒绝/超时、WSS 握手，以及受信本地 TLS 下的加密 COS 图片 PUT/GET 逐字节往返，不依赖用户手机号或配对状态。
 
-main 的 Linux 与 Windows 任务都通过后，以 `wxclipd/Cargo.toml` 的版本创建 GitHub Release，上传安装器、便携 ZIP 和 SHA256SUMS。已存在的版本不覆盖；后续发布请递增版本并更新 `RELEASE-NOTES.md`。
+main 的 Windows 构建、测试和安装验收通过后，在 Windows 发布任务中以 `wxclipd/Cargo.toml` 的版本创建 GitHub Release，上传安装器、便携 ZIP 和 SHA256SUMS。已存在的版本不覆盖；后续发布请递增版本并更新 `packaging/windows/RELEASE-NOTES.md`。
 
 格式检查：
 
-```sh
-cargo fmt --manifest-path wxclipd/Cargo.toml --check
-cargo fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
+```powershell
+cargo +1.92.0-i686-pc-windows-msvc fmt --manifest-path wxclipd/Cargo.toml --check
+cargo +1.92.0-i686-pc-windows-msvc fmt --manifest-path vendor/wx-ime-sdk/Cargo.toml --all --check
 git diff --check
 ```
 

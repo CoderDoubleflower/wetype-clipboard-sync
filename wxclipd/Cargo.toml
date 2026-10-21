@@ -1,10 +1,10 @@
 [package]
 name = "wxclipd"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT"
-description = "Windows and Linux clipboard sync for WeType cross-device clipboard"
+description = "Windows clipboard sync for WeType cross-device clipboard"
 publish = false
 
 [[bin]]
@@ -30,15 +30,11 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "time",
     "signal",
-    "process",
     "io-util",
     "net",
     "sync",
 ] }
 wx-ime-sdk = { path = "../vendor/wx-ime-sdk/crates/wx-ime-sdk" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-evdev = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3.6", default-features = false }

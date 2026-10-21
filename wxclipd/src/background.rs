@@ -1,19 +1,14 @@
 //! Windows notification-area application and background worker supervisor.
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 
-#[cfg(windows)]
 #[allow(dead_code)]
 mod config;
-#[cfg(windows)]
 #[allow(dead_code, unused_imports)]
 mod ipc;
-#[cfg(windows)]
 mod tray;
-#[cfg(any(windows, test))]
 #[path = "tray/model.rs"]
 mod tray_model;
 
-#[cfg(windows)]
 fn main() {
     if let Err(error) = tray::run() {
         // An installer must receive a failing exit code rather than wait for a
@@ -36,9 +31,4 @@ fn main() {
         }
         std::process::exit(1);
     }
-}
-
-#[cfg(not(windows))]
-fn main() {
-    eprintln!("wxclipd-background is the Windows tray application; use wxclipd run on Linux.");
 }

@@ -1,8 +1,9 @@
 //! 诊断工具：对比 `GroupRequest.clipboard_version` 传 0 与传"本地已有版本"时，
 //! 服务端返回的响应大小差异，用来确认该字段是否真的能省流量。
 //!
-//! 用法（需要先停掉 wxclipd 服务，身份目录同一时间只能被一个进程占用）：
-//!   cargo run --example probe_group -- ~/.local/state/wxclipd [测试文本]
+//! 用法（在仓库根目录的 Windows 开发者 PowerShell 中运行；先停止同步，
+//! 身份目录同一时间只能被一个进程占用）：
+//!   cargo run --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc --example probe_group -- "$env:LOCALAPPDATA\wxclipd" "测试文本"
 //!
 //! 给了测试文本时，会先把它发到设备组（手机上会看到这段剪贴板内容），再各发一次
 //! `clipboard_version=0` 与 `clipboard_version=当前` 的请求，对比响应大小。
