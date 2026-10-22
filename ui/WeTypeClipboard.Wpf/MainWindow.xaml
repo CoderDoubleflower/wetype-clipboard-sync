@@ -107,6 +107,31 @@
                     <TextBlock Text="{Binding Notice}" Style="{StaticResource SecondaryText}" AutomationProperties.AutomationId="NoticeText" />
                 </Border>
 
+                <GroupBox Header="剪贴板同步方向" Margin="0,16,0,0">
+                    <StackPanel>
+                        <CheckBox x:Name="SendSwitch" Content="当前设备 → 其他设备"
+                                  Style="{StaticResource DirectionSwitch}" IsThreeState="False"
+                                  IsChecked="{Binding SendEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  IsEnabled="{Binding CanChangeDirections}"
+                                  AutomationProperties.AutomationId="SendSwitch"
+                                  AutomationProperties.Name="当前设备同步到其他设备"
+                                  AutomationProperties.HelpText="控制本机文本和图片的发送；更改后自动保存并重新加载同步。" />
+                        <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,8" />
+                        <CheckBox x:Name="ReceiveSwitch" Content="其他设备 → 当前设备"
+                                  Style="{StaticResource DirectionSwitch}" IsThreeState="False"
+                                  IsChecked="{Binding ReceiveEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  IsEnabled="{Binding CanChangeDirections}"
+                                  AutomationProperties.AutomationId="ReceiveSwitch"
+                                  AutomationProperties.Name="其他设备同步到当前设备"
+                                  AutomationProperties.HelpText="控制接收其他设备的文本和图片；关闭时不拉取剪贴板内容。" />
+                        <TextBlock Text="{Binding DirectionMode}" FontWeight="SemiBold" Margin="0,12,0,0"
+                                   AutomationProperties.AutomationId="DirectionMode" />
+                        <TextBlock Text="{Binding EffectiveDirection}" Style="{StaticResource SecondaryText}" Margin="0,4,0,0" />
+                        <TextBlock Text="文本和图片共用这两个开关。更改后自动保存并重启正在运行的同步；已停止时不会自动启动。"
+                                   Style="{StaticResource SecondaryText}" FontSize="11.5" Margin="0,8,0,0" />
+                    </StackPanel>
+                </GroupBox>
+
                 <Grid Margin="0,16,0,16">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />

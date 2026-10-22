@@ -27,6 +27,8 @@ pub struct SyncOptions {
     pub paste_trigger: bool,
     pub paste_debounce: Duration,
     pub send_current: bool,
+    pub send_enabled: bool,
+    pub receive_enabled: bool,
 }
 
 enum NetworkCommand {
@@ -101,9 +103,14 @@ pub async fn run(
     let (results, mut result_rx) = mpsc::channel(1);
     let network_task = tokio::spawn(network_worker(client.clone(), command_rx, results));
     let (push_tx, mut push_rx) = mpsc::channel::<u32>(8);
-    let push_task = tokio::spawn(notify_loop(client.clone(), push_tx));
+    // Receive-off also avoids the notification connection and image downloads.
+    let push_task = if options.receive_enabled {
+        Some(tokio::spawn(notify_loop(client.clone(), push_tx)))
+    } else {
+        None
+    };
     let (paste_tx, mut paste_rx) = mpsc::channel::<()>(4);
-    if options.paste_trigger {
+    if options.receive_enabled && options.paste_trigger {
         let monitored = crate::input_watch::spawn(paste_tx.clone(), options.paste_debounce);
         if monitored == 0 {
             eprintln!("[wxclipd] 粘贴触发未启用；仍可使用定时同步和 sync-now");
@@ -127,9 +134,14 @@ pub async fn run(
         "[wxclipd] 远端轮询间隔 {} 秒",
         options.poll_interval.as_secs()
     );
+    println!(
+        "[wxclipd] 同步方向：发送={}，接收={}",
+        options.send_enabled, options.receive_enabled
+    );
     let mut state = State::new(options.send_current);
+    state.send_enabled = options.send_enabled;
     let mut read_failed = false;
-    let mut poll_requested = true;
+    let mut poll_requested = options.receive_enabled;
     let mut poll_retry = Retry::new(Instant::now());
     let mut in_flight = false;
 
@@ -248,33 +260,35 @@ pub async fn run(
                     },
                 }
             }
-            _ = local_tick.tick() => {
+            _ = local_tick.tick(), if options.send_enabled || options.receive_enabled => {
                 observe_clipboard(&mut state, &mut read_failed, &runtime_status).await;
             }
             _ = notify.notified() => {
                 // Observe first so an explicit retry never republishes a value
                 // that the user replaced since the last periodic observation.
-                if observe_clipboard(&mut state, &mut read_failed, &runtime_status).await {
+                if (options.send_enabled || options.receive_enabled)
+                    && observe_clipboard(&mut state, &mut read_failed, &runtime_status).await {
                     state.force_retry(Instant::now());
                 }
                 poll_requested = true;
                 poll_retry.reset(Instant::now());
                 println!("[wxclipd] 手动触发同步");
             }
-            _ = poll_tick.tick() => poll_requested = true,
+            _ = poll_tick.tick(), if options.receive_enabled => poll_requested = true,
             Some(_) = push_rx.recv() => poll_requested = true,
             Some(_) = paste_rx.recv() => poll_requested = true,
             _ = maintenance_tick.tick() => {},
         }
 
-        if state.apply_due(Instant::now()) {
+        if options.receive_enabled && state.apply_due(Instant::now()) {
             apply_incoming(&mut state, &mut read_failed, &runtime_status).await;
         }
         update_local_status(&runtime_status, &state);
         if in_flight || state.observed.is_none() {
             continue;
         }
-        if state.incoming.is_none()
+        if options.send_enabled
+            && state.incoming.is_none()
             && state.invalid.is_none()
             && state.outgoing_due(Instant::now()).is_some()
         {
@@ -286,31 +300,14 @@ pub async fn run(
             }
         }
         let now = Instant::now();
-        let command = if state.invalid.is_some() {
-            state.discard_due(now).map(NetworkCommand::Discard)
-        } else if state.incoming.is_some() {
-            // Finish or deliberately discard the SDK's durable receipt before
-            // asking for another one. Acknowledgement errors never lose it.
-            if let Some((id, image)) = state.prepare_due(now) {
-                Some(NetworkCommand::PrepareImage { id, image })
-            } else {
-                state.ack_due(now).map(NetworkCommand::Acknowledge)
-            }
-        } else if state.outgoing.is_some() {
-            state
-                .outgoing_due(now)
-                .map(|(generation, payload)| NetworkCommand::Send {
-                    generation,
-                    payload,
-                })
-        } else if poll_requested && poll_retry.at <= now {
-            poll_requested = false;
-            Some(NetworkCommand::Poll {
-                generation: state.generation,
-            })
-        } else {
-            None
-        };
+        let command = next_network_command(
+            &state,
+            options.send_enabled,
+            options.receive_enabled,
+            &mut poll_requested,
+            &poll_retry,
+            now,
+        );
         if let Some(command) = command {
             if commands.send(command).await.is_err() {
                 break Err(anyhow!("同步网络任务已停止"));
@@ -324,11 +321,52 @@ pub async fn run(
     // a Windows stop/uninstall request hostage until its network timeout.
     control_task.abort();
     network_task.abort();
-    push_task.abort();
+    if let Some(task) = &push_task {
+        task.abort();
+    }
     let _ = control_task.await;
     let _ = network_task.await;
-    let _ = push_task.await;
+    if let Some(task) = push_task {
+        let _ = task.await;
+    }
     outcome
+}
+
+// The worker accepts commands only from this scheduler. Manual sync requests
+// and retry timers share these gates and cannot bypass disabled directions.
+fn next_network_command(
+    state: &State,
+    send_enabled: bool,
+    receive_enabled: bool,
+    poll_requested: &mut bool,
+    poll_retry: &Retry,
+    now: Instant,
+) -> Option<NetworkCommand> {
+    if receive_enabled && state.invalid.is_some() {
+        state.discard_due(now).map(NetworkCommand::Discard)
+    } else if receive_enabled && state.incoming.is_some() {
+        // Finish or deliberately discard the SDK's durable receipt before
+        // asking for another one. Acknowledgement errors never lose it.
+        if let Some((id, image)) = state.prepare_due(now) {
+            Some(NetworkCommand::PrepareImage { id, image })
+        } else {
+            state.ack_due(now).map(NetworkCommand::Acknowledge)
+        }
+    } else if send_enabled && state.outgoing.is_some() {
+        state
+            .outgoing_due(now)
+            .map(|(generation, payload)| NetworkCommand::Send {
+                generation,
+                payload,
+            })
+    } else if receive_enabled && *poll_requested && poll_retry.at <= now {
+        *poll_requested = false;
+        Some(NetworkCommand::Poll {
+            generation: state.generation,
+        })
+    } else {
+        None
+    }
 }
 
 fn update_local_status(runtime_status: &RuntimeStatus, state: &State) {
@@ -759,6 +797,9 @@ async fn control_pair(client: &Client, code: &str) -> String {
         Err(error) => format!("err 配对失败: {error}\n"),
     }
 }
+
+#[cfg(test)]
+mod direction_tests;
 
 #[cfg(test)]
 mod image_tests {

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][int]$UiProcessId,
-    [ValidateSet('Read', 'Invoke')][string]$Action = 'Read',
+    [ValidateSet('Read', 'Invoke', 'Toggle')][string]$Action = 'Read',
     [string]$AutomationId
 )
 $ErrorActionPreference = 'Stop'
@@ -16,19 +16,24 @@ $Condition = [System.Windows.Automation.PropertyCondition]::new(
 $Window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
     [System.Windows.Automation.TreeScope]::Children, $Condition)
 if ($null -eq $Window) {
-    if ($Action -eq 'Invoke') { throw 'WPF window is not available' }
+    if ($Action -in @('Invoke', 'Toggle')) { throw 'WPF window is not available' }
     @{ ready = $false } | ConvertTo-Json -Compress
     exit 0
 }
 
-if ($Action -eq 'Invoke') {
+if ($Action -in @('Invoke', 'Toggle')) {
     if (-not $AutomationId) { throw 'An AutomationId is required for Invoke' }
     $ButtonCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $AutomationId)
     $Button = $Window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $ButtonCondition)
     if ($null -eq $Button -or -not $Button.Current.IsEnabled) { throw "WPF action is unavailable: $AutomationId" }
-    $Pattern = $Button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-    $Pattern.Invoke()
+    if ($Action -eq 'Toggle') {
+        $Pattern = $Button.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+        $Pattern.Toggle()
+    } else {
+        $Pattern = $Button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $Pattern.Invoke()
+    }
     @{ invoked = $AutomationId } | ConvertTo-Json -Compress
     exit 0
 }
@@ -44,11 +49,17 @@ foreach ($Element in $Elements) {
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$Pattern)) {
         $Text = $Pattern.Current.Value
     }
+    $Toggle = $null
+    $ToggleState = $null
+    if ($Element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$Toggle)) {
+        $ToggleState = [int]$Toggle.Current.ToggleState
+    }
     if ($Current.AutomationId) {
         $Controls[$Current.AutomationId] = @{
             text = $Text
             enabled = $Current.IsEnabled
             offscreen = $Current.IsOffscreen
+            toggle_state = $ToggleState
         }
     }
     if ($Text) { $Texts.Add($Text) }

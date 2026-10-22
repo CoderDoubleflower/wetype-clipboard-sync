@@ -29,9 +29,13 @@ internal sealed class UiBridge : IDisposable
         _view = view;
     }
 
+    internal static bool IsAllowedCommand(string command) => command is
+        "start" or "stop" or "restart" or "sync" or "setup" or "log" or "folder"
+        or "send-on" or "send-off" or "receive-on" or "receive-off";
+
     internal void SendCommand(string command)
     {
-        if (command is not ("start" or "stop" or "restart" or "sync" or "setup" or "log" or "folder"))
+        if (!IsAllowedCommand(command))
             return;
         if (!_commands.Writer.TryWrite(command))
             Application.Current.Shutdown(1);

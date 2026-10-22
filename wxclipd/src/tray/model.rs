@@ -64,6 +64,8 @@ pub struct View {
     pub operation: Option<String>,
     pub notice: Option<String>,
     pub saved_config: String,
+    pub saved_send_enabled: Option<bool>,
+    pub saved_receive_enabled: Option<bool>,
     pub ready: bool,
 }
 
@@ -75,6 +77,8 @@ impl Default for View {
             operation: None,
             notice: None,
             saved_config: "正在读取配置……".to_owned(),
+            saved_send_enabled: None,
+            saved_receive_enabled: None,
             ready: false,
         }
     }
@@ -107,7 +111,13 @@ impl View {
                     safe.insert(key.to_owned(), value.into());
                 }
             }
-            for key in ["pending_send", "send_paused", "paste_trigger"] {
+            for key in [
+                "pending_send",
+                "send_paused",
+                "paste_trigger",
+                "send_enabled",
+                "receive_enabled",
+            ] {
                 if let Some(value) = runtime[key].as_bool() {
                     safe.insert(key.to_owned(), value.into());
                 }
@@ -144,6 +154,8 @@ impl View {
             "state_directory": state,
             "runtime": display.runtime,
             "saved_config": display.saved_config,
+            "send_enabled": display.saved_send_enabled,
+            "receive_enabled": display.saved_receive_enabled,
         }))?;
         if bytes.len() > 128 * 1024 {
             bail!("界面状态超过大小限制");
@@ -178,7 +190,15 @@ impl View {
         }
         match value["phase"].as_str() {
             Some("initializing") => "正在连接服务",
-            Some("running") => "同步运行中",
+            Some("running") => match (
+                value["send_enabled"].as_bool(),
+                value["receive_enabled"].as_bool(),
+            ) {
+                (Some(false), Some(false)) => "剪贴板收发已关闭",
+                (Some(true), Some(false)) => "仅发送到其他设备",
+                (Some(false), Some(true)) => "仅接收其他设备",
+                _ => "双向同步运行中",
+            },
             Some("retrying") => "连接或同步异常，正在重试",
             Some("stopping") => "正在停止",
             Some("stopped") => "同步已停止",
@@ -270,6 +290,16 @@ impl View {
                     "关闭"
                 }
             ));
+            if let (Some(send), Some(receive)) = (
+                value["send_enabled"].as_bool(),
+                value["receive_enabled"].as_bool(),
+            ) {
+                lines.push(format!(
+                    "发送到其他设备：{}；接收其他设备：{}",
+                    if send { "开启" } else { "关闭" },
+                    if receive { "开启" } else { "关闭" }
+                ));
+            }
             lines.push(String::new());
         }
         lines.push("【已保存的配置】".to_owned());
@@ -277,7 +307,7 @@ impl View {
         lines.push("保存后点击「重启同步」应用；环境变量可能覆盖文件内的代理。".to_owned());
         lines.push(String::new());
         lines.push(format!("状态目录：{state}"));
-        lines.push("图片与文本同步：已启用；图片文件需使用「复制图片」或截图。".to_owned());
+        lines.push("方向开关同时控制文本与图片；图片文件需使用「复制图片」或截图。".to_owned());
         lines.join("\r\n")
     }
 }

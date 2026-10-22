@@ -19,6 +19,8 @@ internal sealed class UiSnapshot
     public string? Notice { get; init; }
     public string? StateDirectory { get; init; }
     public string? SavedConfig { get; init; }
+    public bool? SendEnabled { get; init; }
+    public bool? ReceiveEnabled { get; init; }
     public RuntimeSnapshot? Runtime { get; init; }
 
     internal static readonly JsonSerializerOptions JsonOptions = new()
@@ -47,6 +49,8 @@ internal sealed class RuntimeSnapshot
     public ulong? PollIntervalSeconds { get; init; }
     public ulong? LocalPollIntervalMs { get; init; }
     public bool? PasteTrigger { get; init; }
+    public bool? SendEnabled { get; init; }
+    public bool? ReceiveEnabled { get; init; }
 }
 
 internal sealed class StatusViewModel : INotifyPropertyChanged
@@ -58,8 +62,37 @@ internal sealed class StatusViewModel : INotifyPropertyChanged
     public bool Busy => _snapshot.Busy || _commandPending;
     public bool CanStart => !Busy && !_snapshot.Running;
     public bool CanStop => !Busy && _snapshot.Running;
-    public bool CanSync => !Busy && _snapshot.Running;
+    public bool CanSync => !Busy && _snapshot.Running && !(Runtime?.SendEnabled == false && Runtime?.ReceiveEnabled == false);
     public bool CanConfigure => !Busy;
+    public event Action<string>? DirectionRequested;
+    public bool CanChangeDirections => !Busy && _snapshot.Ready && _snapshot.SendEnabled.HasValue && _snapshot.ReceiveEnabled.HasValue;
+    public bool SendEnabled
+    {
+        get => _snapshot.SendEnabled ?? Runtime?.SendEnabled ?? true;
+        set => RequestDirection(value, SendEnabled, value ? "send-on" : "send-off");
+    }
+    public bool ReceiveEnabled
+    {
+        get => _snapshot.ReceiveEnabled ?? Runtime?.ReceiveEnabled ?? true;
+        set => RequestDirection(value, ReceiveEnabled, value ? "receive-on" : "receive-off");
+    }
+    public string DirectionMode => Mode(SendEnabled, ReceiveEnabled);
+    public string EffectiveDirection => Runtime?.SendEnabled is bool send && Runtime?.ReceiveEnabled is bool receive
+        ? $"实际运行：{Mode(send, receive)}" : "当前未取得运行中的方向配置";
+    private static string Mode(bool send, bool receive) => (send, receive) switch
+    {
+        (true, true) => "双向同步",
+        (true, false) => "仅发送到其他设备",
+        (false, true) => "仅接收其他设备",
+        _ => "剪贴板收发均已关闭",
+    };
+    private void RequestDirection(bool desired, bool current, string command)
+    {
+        if (!CanChangeDirections || desired == current)
+            return;
+        MarkCommandPending();
+        DirectionRequested?.Invoke(command);
+    }
     public Visibility StartVisibility => _snapshot.Running ? Visibility.Collapsed : Visibility.Visible;
     public Visibility StopVisibility => _snapshot.Running ? Visibility.Visible : Visibility.Collapsed;
     private RuntimeSnapshot? Runtime => _snapshot.Runtime;
@@ -70,7 +103,13 @@ internal sealed class StatusViewModel : INotifyPropertyChanged
         ? "上次发送结果不确定。查看日志后可点击「立即同步」重试；重试可能重复发送。"
         : Phase switch
         {
-            "running" => "文本与图片正在此电脑和已配对设备之间自动同步。",
+            "running" => (Runtime?.SendEnabled, Runtime?.ReceiveEnabled) switch
+            {
+                (false, false) => "文本与图片的收发均已关闭；开启任一方向即可恢复该方向的同步。",
+                (true, false) => "只发送此电脑新复制的文本与图片，不接收其他设备的剪贴板。",
+                (false, true) => "只接收其他设备的文本与图片，此电脑复制的内容不会上传。",
+                _ => "文本与图片正在此电脑和已配对设备之间自动同步。",
+            },
             "stopped" => "点击「开始同步」，继续在设备间接收和发送文本与图片。",
             "retrying" => "后台正在自动恢复连接。你可以继续使用电脑，稍后会重试同步。",
             "initializing" => "正在连接服务并读取设备信息，请稍候。",
@@ -80,7 +119,7 @@ internal sealed class StatusViewModel : INotifyPropertyChanged
             _ => _snapshot.Ready ? "暂时无法读取本地状态，请稍后重试或查看日志。" : "正在读取本地配置与同步状态。",
         };
     public string Tone => Runtime?.SendPaused == true || Phase is "retrying" or "legacy" or "unavailable"
-        ? "warning" : Phase == "running" ? "active" : "neutral";
+        ? "warning" : Phase == "running" && !(Runtime?.SendEnabled == false && Runtime?.ReceiveEnabled == false) ? "active" : "neutral";
     public string StatusGlyph => Tone == "warning" ? "\uE7BA" : Phase == "stopped" ? "\uE769" : "\uE895";
     public string? Notice => _snapshot.Notice;
     public bool HasNotice => !string.IsNullOrWhiteSpace(Notice);

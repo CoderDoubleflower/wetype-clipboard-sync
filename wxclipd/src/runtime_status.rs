@@ -22,6 +22,8 @@ struct Snapshot {
     proxy_source: &'static str,
     poll_interval_seconds: u64,
     paste_trigger: bool,
+    send_enabled: bool,
+    receive_enabled: bool,
     local_poll_interval_ms: u64,
     last_success_at: Option<u64>,
     last_send_at: Option<u64>,
@@ -65,6 +67,8 @@ impl RuntimeStatus {
             proxy_source,
             poll_interval_seconds: config.poll_interval_seconds,
             paste_trigger: config.paste_trigger,
+            send_enabled: config.send_enabled,
+            receive_enabled: config.receive_enabled,
             local_poll_interval_ms: local_interval.as_millis().min(u64::MAX as u128) as u64,
             last_success_at: None,
             last_send_at: None,
@@ -107,6 +111,8 @@ impl RuntimeStatus {
             "proxy_source": state.proxy_source,
             "poll_interval_seconds": state.poll_interval_seconds,
             "paste_trigger": state.paste_trigger,
+            "send_enabled": state.send_enabled,
+            "receive_enabled": state.receive_enabled,
             "local_poll_interval_ms": state.local_poll_interval_ms,
             "last_success_at": state.last_success_at,
             "last_send_at": state.last_send_at,
@@ -213,6 +219,28 @@ mod tests {
             Duration::from_millis(400),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn inspection_reports_effective_directions_even_during_initialization() {
+        for send_enabled in [false, true] {
+            for receive_enabled in [false, true] {
+                let config = Config {
+                    send_enabled,
+                    receive_enabled,
+                    ..Config::default()
+                };
+                let status = RuntimeStatus::new(
+                    &config,
+                    "direct",
+                    "test-pc".into(),
+                    Duration::from_millis(400),
+                )
+                .unwrap();
+                assert_eq!(status.value()["send_enabled"], send_enabled);
+                assert_eq!(status.value()["receive_enabled"], receive_enabled);
+            }
+        }
     }
 
     #[test]
