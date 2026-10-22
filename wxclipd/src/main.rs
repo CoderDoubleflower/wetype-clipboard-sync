@@ -1256,6 +1256,8 @@ mod tests {
             proxy: Some(proxy_url),
             poll_interval_seconds: 17,
             paste_trigger: false,
+            send_enabled: false,
+            receive_enabled: true,
         };
         let runtime_status = runtime_status::RuntimeStatus::new(
             &settings,
@@ -1289,6 +1291,8 @@ mod tests {
                 serde_json::from_str(reply.strip_prefix("ok ").unwrap()).unwrap();
             assert_eq!(value["poll_interval_seconds"], 17);
             assert_eq!(value["paste_trigger"], false);
+            assert_eq!(value["send_enabled"], false);
+            assert_eq!(value["receive_enabled"], true);
             assert_eq!(value["local_poll_interval_ms"], 700);
             assert!(value["last_success_at"].is_null());
             if value["phase"] == "retrying" {
