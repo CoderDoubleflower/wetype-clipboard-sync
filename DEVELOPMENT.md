@@ -19,7 +19,7 @@ $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-stati
 cargo +1.92.0-i686-pc-windows-msvc test --locked --release --manifest-path wxclipd/Cargo.toml -p wxclipd -p wx-ime-sdk -p wx-ime-protocol --features wxclipd/vendored-openssl --target i686-pc-windows-msvc -- --test-threads=1
 cargo +1.92.0-i686-pc-windows-msvc build --locked --release --manifest-path wxclipd/Cargo.toml --features vendored-openssl --target i686-pc-windows-msvc
 
-./packaging/windows/build-package.ps1 -Version 0.5.0
+./packaging/windows/build-package.ps1 -Version 0.6.0
 ```
 
 应用、SDK 和协议测试共用应用的 lockfile、release profile 和 target 目录，验证实际交付的依赖版本，并避免 MSVC 的串行 OpenSSL 构建重复执行。SDK 不再附带独立 CLI、npm 包及其分发脚本。
@@ -59,7 +59,7 @@ Windows 原生剪贴板测试操作执行测试账户的实际剪贴板，因此
 
 ## 配置和网络
 
-`config.json` 保存 `proxy`、`poll_interval_seconds` 和 `paste_trigger`。代理优先级是命令行、`WXCLIPD_PROXY`、配置文件、直连。环境变量为空表示显式直连；系统 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 不改变应用路由。
+`config.json` 保存 `proxy`、`poll_interval_seconds`、`paste_trigger`、`send_enabled` 和 `receive_enabled`。后两个布尔字段缺省为 true，分别控制文本/图片的发送与接收。代理优先级是命令行、`WXCLIPD_PROXY`、配置文件、直连。环境变量为空表示显式直连；系统 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 不改变应用路由。
 
 HTTP 代理使用 CONNECT，支持 Basic 认证；SOCKS5 支持用户名密码认证。`socks5://` 本地解析目标域名，`socks5h://` 把目标域名交给代理。控制 API、COS 图片/文本下载上传和通知 WSS 使用同一配置，不在代理失败时回退直连。图片沿用 SDK 的加密 COS 通道，不需要局域网文件通道；SDK 中应用未使用的文件传输通道没有扩展代理能力。
 
@@ -96,6 +96,8 @@ WPF 主题默认跟随 Windows 应用模式，响应 `WM_SETTINGCHANGE` / 系统
 图标采用原始品牌资源并派生多个 Windows ICO 尺寸，来源与权利说明随仓库保留；不能将其混入原创代码的 MIT 授权。构建时将图标和版本资源嵌入 Rust 与 WPF 可执行文件，安装器也使用同一图标。托盘处理 `TaskbarCreated` 以恢复资源管理器重启后的图标，退出时删除图标。
 
 ## 同步状态约定
+
+方向设置由托盘 worker 串行执行停止、原子保存和按原运行状态重启，WPF 只发送明确的 `send-on` / `send-off` / `receive-on` / `receive-off` 命令。设置向导使用同一存在锁防止覆盖方向修改。发送关闭时不产生出站队列；接收关闭时不创建推送与输入监听、不安排拉取/图片准备/确认，也不应用入站内容。`sync-now` 与重试必须经过相同方向门控。两个方向都关闭不等于注销或完全断开初始化网络；完整停止使用 stop。
 
 本地默认每 400 ms 观察一次，独立于网络请求。远端默认每 10 秒轮询，并接受通知、Ctrl/右键和 `sync-now` 触发。输入触发不会阻塞或重放用户按键；不能保证同一次 Ctrl+V 等待网络完成。
 

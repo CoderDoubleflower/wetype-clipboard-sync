@@ -53,6 +53,10 @@ const ID_SETUP: usize = 1006;
 const ID_LOG: usize = 1007;
 const ID_FOLDER: usize = 1008;
 const ID_EXIT: usize = 1009;
+const ID_SEND_ON: usize = 1010;
+const ID_SEND_OFF: usize = 1011;
+const ID_RECEIVE_ON: usize = 1012;
+const ID_RECEIVE_OFF: usize = 1013;
 
 type SharedView = Arc<Mutex<View>>;
 enum Action {
@@ -60,6 +64,8 @@ enum Action {
     Start,
     Stop,
     Restart,
+    SetSend(bool),
+    SetReceive(bool),
     Sync,
     Setup,
     Exit,
@@ -545,6 +551,10 @@ fn command(ui: &Ui, id: usize) {
         ID_STOP => send_action(ui, Action::Stop),
         ID_RESTART => send_action(ui, Action::Restart),
         ID_SYNC => send_action(ui, Action::Sync),
+        ID_SEND_ON => send_action(ui, Action::SetSend(true)),
+        ID_SEND_OFF => send_action(ui, Action::SetSend(false)),
+        ID_RECEIVE_ON => send_action(ui, Action::SetReceive(true)),
+        ID_RECEIVE_OFF => send_action(ui, Action::SetReceive(false)),
         ID_SETUP => send_action(ui, Action::Setup),
         ID_EXIT => send_action(ui, Action::Exit),
         ID_LOG | ID_FOLDER => {
@@ -580,6 +590,40 @@ fn show_menu(ui: &Ui) {
             0,
             wide(view.phase_label()).as_ptr(),
         );
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    }
+    for (value, on, off, label) in [
+        (
+            view.saved_send_enabled,
+            ID_SEND_ON,
+            ID_SEND_OFF,
+            "当前设备 → 其他设备",
+        ),
+        (
+            view.saved_receive_enabled,
+            ID_RECEIVE_ON,
+            ID_RECEIVE_OFF,
+            "其他设备 → 当前设备",
+        ),
+    ] {
+        let enabled = value == Some(true);
+        let flags = MF_STRING
+            | if enabled { MF_CHECKED } else { 0 }
+            | if view.busy || value.is_none() {
+                MF_GRAYED
+            } else {
+                0
+            };
+        unsafe {
+            AppendMenuW(
+                menu,
+                flags,
+                if enabled { off } else { on },
+                wide(label).as_ptr(),
+            );
+        }
+    }
+    unsafe {
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
     }
     for (id, label, enabled) in [

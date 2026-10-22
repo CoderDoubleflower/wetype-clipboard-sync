@@ -1,7 +1,10 @@
 //! Private, inherited-pipe connection to the WPF presentation process. The tray
 //! remains the sole owner of synchronization, setup, and application lifetime.
 
-use super::{SharedView, ID_FOLDER, ID_LOG, ID_RESTART, ID_SETUP, ID_START, ID_STOP, ID_SYNC};
+use super::{
+    SharedView, ID_FOLDER, ID_LOG, ID_RECEIVE_OFF, ID_RECEIVE_ON, ID_RESTART, ID_SEND_OFF,
+    ID_SEND_ON, ID_SETUP, ID_START, ID_STOP, ID_SYNC,
+};
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -262,6 +265,10 @@ fn action_id(command: &str) -> Option<usize> {
         "setup" => ID_SETUP,
         "log" => ID_LOG,
         "folder" => ID_FOLDER,
+        "send-on" => ID_SEND_ON,
+        "send-off" => ID_SEND_OFF,
+        "receive-on" => ID_RECEIVE_ON,
+        "receive-off" => ID_RECEIVE_OFF,
         _ => return None,
     })
 }
@@ -292,6 +299,21 @@ fn read_command(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direction_actions_are_explicit_and_allowlisted() {
+        for (command, id) in [
+            ("send-on", ID_SEND_ON),
+            ("send-off", ID_SEND_OFF),
+            ("receive-on", ID_RECEIVE_ON),
+            ("receive-off", ID_RECEIVE_OFF),
+        ] {
+            assert_eq!(action_id(command), Some(id));
+        }
+        for command in ["toggle-send", "send-on true", "receive-off\nstart"] {
+            assert_eq!(action_id(command), None);
+        }
+    }
 
     #[test]
     fn display_can_only_request_complete_allowlisted_actions() {

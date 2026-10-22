@@ -38,6 +38,7 @@ pub fn run(
                 Action::Launch(_) | Action::Start => "正在启动同步……",
                 Action::Stop => "正在停止同步……",
                 Action::Restart => "正在重新加载配置并启动……",
+                Action::SetSend(_) | Action::SetReceive(_) => "正在保存并应用同步方向……",
                 Action::Sync => "正在请求立即同步……",
                 Action::Setup => "正在打开设置与配对……",
                 Action::Exit => "正在停止同步并退出托盘……",
@@ -49,6 +50,7 @@ pub fn run(
                 view.notice = None;
             }
             let exit = matches!(&action, Action::Exit);
+            let changing_direction = matches!(&action, Action::SetSend(_) | Action::SetReceive(_));
             let owned_settings_open = setup
                 .as_mut()
                 .is_some_and(|process| process.try_wait().ok().flatten().is_none());
@@ -58,7 +60,12 @@ pub fn run(
             let blocked_by_settings = settings_open
                 && matches!(
                     &action,
-                    Action::Start | Action::Stop | Action::Restart | Action::Exit
+                    Action::Start
+                        | Action::Stop
+                        | Action::Restart
+                        | Action::Exit
+                        | Action::SetSend(_)
+                        | Action::SetReceive(_)
                 );
             let result = runtime.block_on(async {
                 // The interactive setup command can start a tray after saving.
@@ -88,6 +95,12 @@ pub fn run(
                     Action::Restart => {
                         stop_owned(&state, &mut child).await?;
                         ensure_started(&state, &context, &mut child).await
+                    }
+                    Action::SetSend(enabled) => {
+                        change_direction(&state, &context, &mut child, Some(enabled), None).await
+                    }
+                    Action::SetReceive(enabled) => {
+                        change_direction(&state, &context, &mut child, None, Some(enabled)).await
                     }
                     Action::Sync => {
                         short_call(&state, "sync").await?.context("同步尚未启动")?;
@@ -124,8 +137,11 @@ pub fn run(
                         "无法确认设置窗口状态。请稍后重试或检查当前用户的目录权限。".to_owned()
                     }
                     Err(_) if blocked_by_settings => {
-                        "请先完成或关闭「设置与配对」窗口，再开始、停止、重启或退出同步。"
+                        "请先完成或关闭「设置与配对」窗口，再修改方向、开始、停止、重启或退出同步。"
                             .to_owned()
+                    }
+                    Err(_) if changing_direction => {
+                        "同步方向未完全应用，同步可能已停止。请核对已保存与实际运行的方向，检查配置权限后重试。".to_owned()
                     }
                     Err(_) if exit => {
                         "未能确认后台已停止，托盘已保留。请稍后重试；仍失败时查看日志。".to_owned()
@@ -141,9 +157,16 @@ pub fn run(
         if Instant::now() >= next_probe {
             let snapshot = runtime.block_on(inspect(&state));
             let saved = saved_config(&state, &context);
+            let saved_settings = config::Config::load(&state).ok();
             let mut view = view.lock().unwrap_or_else(|e| e.into_inner());
             view.runtime = snapshot.ok();
             view.saved_config = saved;
+            view.saved_send_enabled = saved_settings
+                .as_ref()
+                .map(|settings| settings.send_enabled);
+            view.saved_receive_enabled = saved_settings
+                .as_ref()
+                .map(|settings| settings.receive_enabled);
             view.ready = true;
             if let Some(process) = child.as_mut() {
                 if let Ok(Some(status)) = process.try_wait() {
@@ -158,6 +181,43 @@ pub fn run(
             }
             next_probe = Instant::now() + Duration::from_secs(2);
         }
+    }
+}
+
+/// Direction changes are serialized with lifecycle actions. Stop first, then
+/// atomically save, then start only if already running. A failed save leaves
+/// synchronization stopped instead of accidentally continuing to upload.
+async fn change_direction(
+    state: &Path,
+    context: &LaunchContext,
+    child: &mut Option<Child>,
+    send: Option<bool>,
+    receive: Option<bool>,
+) -> Result<String> {
+    // Share the settings-presence lock with the interactive wizard so it cannot
+    // overwrite this update using an older copy of config.json.
+    let _settings_guard = ipc::begin_setup(state)?;
+    let mut settings = config::Config::load(state)?;
+    if let Some(value) = send {
+        settings.send_enabled = value;
+    }
+    if let Some(value) = receive {
+        settings.receive_enabled = value;
+    }
+    let owned_running = match child.as_mut() {
+        Some(process) => process.try_wait()?.is_none(),
+        None => false,
+    };
+    let was_running = short_call(state, "ping").await?.is_some() || owned_running;
+    if was_running {
+        stop_owned(state, child).await?;
+    }
+    settings.save(state)?;
+    if was_running {
+        ensure_started(state, context, child).await?;
+        Ok("同步方向已保存并重新加载；配对不变，收发统计从本次启动重新计数。".to_owned())
+    } else {
+        Ok("同步方向已保存；下次开始同步时生效，当前保持停止。".to_owned())
     }
 }
 
@@ -290,14 +350,16 @@ async fn stop_owned(state: &Path, child: &mut Option<Child>) -> Result<()> {
 fn saved_config(state: &Path, context: &LaunchContext) -> String {
     let mut text = match config::Config::load(state) {
         Ok(config) => format!(
-            "代理：{}\r\n远端轮询：{} 秒；Ctrl / 右键触发：{}",
+            "代理：{}\r\n远端轮询：{} 秒；Ctrl / 右键触发：{}\r\n发送到其他设备：{}；接收其他设备：{}",
             safe_proxy(config.proxy.as_deref()),
             config.poll_interval_seconds,
             if config.paste_trigger {
                 "开启"
             } else {
                 "关闭"
-            }
+            },
+            if config.send_enabled { "开启" } else { "关闭" },
+            if config.receive_enabled { "开启" } else { "关闭" }
         ),
         Err(_) => "config.json 无效或无法读取；可通过设置向导修复，或打开配置目录检查。".to_owned(),
     };

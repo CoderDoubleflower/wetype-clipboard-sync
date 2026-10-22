@@ -1,6 +1,32 @@
-# WeType Clipboard Sync 0.5.0 · Windows 使用说明
+# WeType Clipboard Sync 0.6.0 · Windows 使用说明
 
 本程序通过手机微信输入法的「跨设备粘贴」，双向同步手机与 Windows 电脑的**文本和图片剪贴板**。支持 **Windows 10 1607 及以上 / Windows 11**；发布包中的 **x86 是 32 位程序**，可在 64 位 Windows 上兼容运行。
+
+## 剪贴板同步方向（v0.6.0）
+
+打开托盘的「状态与配置」，在「剪贴板同步方向」中分别控制：
+
+- **当前设备 → 其他设备**：发送本机新复制的文本和图片。
+- **其他设备 → 当前设备**：接收其他设备的文本和图片，写入本机剪贴板。
+
+两个开关默认都开启；旧配置缺少这两个字段时继续双向同步。可以只发送、只接收，或同时关闭。托盘右键菜单也提供同样的开关。
+
+更改后自动保存到 `config.json`，并停止、重新启动原本正在运行的同步进程以应用配置；配对身份、代理和其他设置不变，收发计数从新进程开始计算。已经停止同步时只保存设置，不会擅自开始同步。更改失败时界面会提示失败，并区分已保存设置与实际运行方向。设置与配对向导打开时不能同时修改方向。
+
+关闭发送不会积累待发送内容；重新开启后从新复制的内容开始，不会自动补发关闭期间留在剪贴板中的内容。关闭接收会停用剪贴板推送通道、定时/粘贴触发拉取与图片下载，不改写本机剪贴板。重新开启接收后恢复正常拉取，可能接收服务器仍保留的内容；此开关不清空云端剪贴板，也不解绑设备。切换前已交给服务器的发送无法撤回。
+
+“立即同步”和 `--send-current` 不会绕过已关闭的方向。两个开关都关闭时暂停剪贴板收发，不代表注销账户或停止全部连接初始化；完全停止后台请使用「停止同步」。这些开关控制自动剪贴板文本/图片同步，不控制单独的文件传送协议。
+
+配置字段：
+
+```json
+{
+  "send_enabled": true,
+  "receive_enabled": true
+}
+```
+
+手动编辑配置后需要重启同步；使用界面开关则自动处理。字段必须是 JSON 布尔值，不接受字符串、数字或 `null`。
 
 ## 安装与首次配对
 
@@ -8,8 +34,8 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| `wetype-clipboard-sync-0.5.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
-| `wetype-clipboard-sync-0.5.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
+| `wetype-clipboard-sync-0.6.0-windows-x86-setup.exe` | 运行安装向导，安装到当前用户，不需要管理员权限 |
+| `wetype-clipboard-sync-0.6.0-windows-x86-portable.zip` | 完整解压到固定目录，再双击 `wxclipd-background.exe` |
 
 安装版默认位置为 `%LOCALAPPDATA%\Programs\WeTypeClipboardSync`。安装时的 **Start clipboard sync when I sign in** 控制登录后自启；完成后启动程序，右下角出现微信输入法图标。右键图标打开「设置与配对」，也可以使用开始菜单中的 **Setup and Pair**。本项目是非官方同步工具，状态窗口标题为 **WeType 剪贴板同步 — 状态与配置**。
 
@@ -236,7 +262,7 @@ Get-Content "$env:LOCALAPPDATA\wxclipd\wxclipd.log" -Tail 50 -Wait
 发布页同时提供 `SHA256SUMS.txt`。PowerShell 可计算下载文件的校验值，与对应行比较：
 
 ```powershell
-Get-FileHash .\wetype-clipboard-sync-0.5.0-windows-x86-setup.exe -Algorithm SHA256
+Get-FileHash .\wetype-clipboard-sync-0.6.0-windows-x86-setup.exe -Algorithm SHA256
 ```
 
 本项目是非官方协议实现，与腾讯无关联。源码与许可证见 [项目仓库](https://github.com/CoderDoubleflower/wetype-clipboard-sync) 与包内 `THIRD_PARTY.md`。

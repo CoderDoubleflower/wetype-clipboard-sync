@@ -27,6 +27,12 @@ internal static class CaptureVerification
         window.UpdateLayout();
         var checks = new List<string>();
 
+        foreach (var command in new[] { "send-on", "send-off", "receive-on", "receive-off" })
+            Require(UiBridge.IsAllowedCommand(command), "Direction action must pass the WPF bridge allowlist.");
+        foreach (var command in new[] { "toggle-send", "send-on true", "receive-off\nstart", "exit", "" })
+            Require(!UiBridge.IsAllowedCommand(command), "Unknown or injected direction actions must be rejected.");
+        checks.Add("explicit direction bridge command allowlist");
+
         Require(window.SyncButton.IsEnabled && window.StopButton.IsEnabled, "Running actions must be enabled.");
         Require(!window.StartButton.IsVisible, "Running view must not show Start.");
         checks.Add("running action state");
@@ -44,6 +50,24 @@ internal static class CaptureVerification
         view.Apply(new UiSnapshot { Running = true, Phase = "running", Runtime = new RuntimeSnapshot { SendPaused = true } });
         Require(view.Tone == "warning" && view.Description.Contains("查看日志"), "Paused sends must not look healthy.");
         checks.Add("paused send warning");
+
+        foreach (var send in new[] { false, true })
+        foreach (var receive in new[] { false, true })
+        {
+            view.Apply(new UiSnapshot
+            {
+                Running = true, Ready = true, Phase = "running", SendEnabled = send, ReceiveEnabled = receive,
+                Runtime = new RuntimeSnapshot { SendEnabled = send, ReceiveEnabled = receive },
+            });
+            window.UpdateLayout();
+            Require(window.SendSwitch.IsChecked == send && window.ReceiveSwitch.IsChecked == receive, "Direction switches must reflect configuration.");
+            Require(window.SyncButton.IsEnabled == (send || receive), "Sync-now must be disabled when both directions are off.");
+        }
+        checks.Add("all four direction modes and manual sync gating");
+        view.Apply(new UiSnapshot { Running = true, Ready = true, Busy = true, SendEnabled = true, ReceiveEnabled = true });
+        window.UpdateLayout();
+        Require(!window.SendSwitch.IsEnabled && !window.ReceiveSwitch.IsEnabled, "Busy direction changes must be disabled.");
+        checks.Add("busy direction switches disabled");
 
         window.Width = 740;
         window.UpdateLayout();
@@ -188,6 +212,8 @@ internal static class CaptureVerification
         PhaseLabel = "同步运行中",
         Running = true,
         Ready = true,
+        SendEnabled = true,
+        ReceiveEnabled = true,
         StateDirectory = @"C:\Users\WeType\AppData\Local\wxclipd",
         SavedConfig = "代理：socks5h://127.0.0.1:1080\n远端轮询：10 秒；Ctrl / 右键触发：开启",
         Runtime = new RuntimeSnapshot
@@ -206,6 +232,8 @@ internal static class CaptureVerification
             PollIntervalSeconds = 10,
             LocalPollIntervalMs = 400,
             PasteTrigger = true,
+            SendEnabled = true,
+            ReceiveEnabled = true,
         },
     };
 }

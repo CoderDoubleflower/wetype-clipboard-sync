@@ -77,6 +77,7 @@ pub(super) struct State {
     pub invalid: Option<InvalidIncoming>,
     pub last_published: Option<(u64, u64)>, // (group, server revision)
     send_current: bool,
+    pub send_enabled: bool,
 }
 
 impl State {
@@ -89,6 +90,7 @@ impl State {
             invalid: None,
             last_published: None,
             send_current,
+            send_enabled: true,
         }
     }
 
@@ -104,7 +106,7 @@ impl State {
             .as_ref()
             .is_none_or(|previous| previous.content != snapshot.content);
         self.generation = self.generation.wrapping_add(1);
-        if content_changed && (!first || self.send_current) {
+        if self.send_enabled && content_changed && (!first || self.send_current) {
             self.outgoing = snapshot
                 .content
                 .as_ref()
@@ -130,6 +132,9 @@ impl State {
     }
 
     pub fn outgoing_due(&self, now: Instant) -> Option<(u64, Payload)> {
+        if !self.send_enabled {
+            return None;
+        }
         self.outgoing
             .as_ref()
             .filter(|pending| !pending.paused && pending.retry.at <= now)

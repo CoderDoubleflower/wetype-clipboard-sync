@@ -224,6 +224,12 @@ function Invoke-WpfAction([string]$AutomationId) {
         '-File', $WpfInspection, '-UiProcessId', "$($WpfProcess.Id)", '-Action', 'Invoke', '-AutomationId', $AutomationId) 10000 -Capture
 }
 
+function Toggle-WpfDirection([string]$AutomationId) {
+    $null = Wait-Value { (Read-WpfView).controls.$AutomationId.enabled } "enabled direction switch $AutomationId"
+    $null = Invoke-Program $WindowsPowerShell @('-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', $WpfInspection, '-UiProcessId', "$($WpfProcess.Id)", '-Action', 'Toggle', '-AutomationId', $AutomationId) 10000 -Capture
+}
+
 function Post-TrayCommand([int]$CommandId) {
     # Match an actual click: a previous launch/action can still own the worker
     # queue after the named pipe becomes available. Busy buttons reject clicks.
@@ -379,6 +385,39 @@ try {
     } 'rendered WPF status and effective/saved proxy configuration'
     Assert-SecretFree $View.text
 
+    Write-Host '[tray check] Exercising both direction switches through UI Automation.'
+    if ($Status.send_enabled -ne $true -or $Status.receive_enabled -ne $true) { throw 'Old configuration did not default to bidirectional sync' }
+    foreach ($Mode in @(
+        @{ control = 'SendSwitch'; send = $false; receive = $true },
+        @{ control = 'ReceiveSwitch'; send = $false; receive = $false },
+        @{ control = 'SendSwitch'; send = $true; receive = $false },
+        @{ control = 'ReceiveSwitch'; send = $true; receive = $true }
+    )) {
+        Toggle-WpfDirection $Mode.control
+        $Next = Wait-Value {
+            $Current = Inspect-Worker -DuringTransition
+            if ($null -ne $Current -and $Current.pid -gt 0 -and $Current.pid -ne $Daemon.Id -and
+                $Current.send_enabled -eq $Mode.send -and $Current.receive_enabled -eq $Mode.receive) { return $Current }
+        } 'direction change persisted and loaded into a new worker' 25
+        if (-not $Daemon.WaitForExit(10000)) { throw 'Direction change left the old worker running' }
+        $Daemon = Get-Process -Id $Next.pid
+        $null = $Daemon.Handle
+        $OwnedProcesses.Add($Daemon)
+        $Saved = Get-Content (Join-Path $TestState 'config.json') -Raw | ConvertFrom-Json
+        if ($Saved.send_enabled -ne $Mode.send -or $Saved.receive_enabled -ne $Mode.receive -or
+            $Saved.proxy -ne 'socks5h://saved-user:saved-password@127.0.0.1:1' -or
+            $Saved.poll_interval_seconds -ne 17 -or $Saved.paste_trigger -ne $false) { throw 'Direction update lost another setting' }
+        $null = Wait-Value {
+            $Current = Read-WpfView
+            $Current.controls.SendSwitch.toggle_state -eq [int]$Mode.send -and
+                $Current.controls.ReceiveSwitch.toggle_state -eq [int]$Mode.receive -and
+                $Current.controls.SendSwitch.enabled
+        } 'switch state reflects the saved configuration'
+        if ($WpfProcess.HasExited -or $Tray.HasExited) { throw 'Direction change replaced the UI or tray' }
+    }
+    if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Direction changes replaced pairing identity' }
+    $ConfigHash = (Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash
+
     Write-Host '[tray check] Changing the Windows application theme while the same WPF window stays open.'
     if (-not (Test-Path $ThemeKey)) { New-Item -Path $ThemeKey -Force | Out-Null }
     foreach ($Theme in @(@{ value = 1; name = 'light'; label = '浅色' }, @{ value = 0; name = 'dark'; label = '深色' })) {
@@ -414,6 +453,18 @@ try {
     $null = Wait-Value { (Inspect-Worker -DuringTransition).phase -eq 'stopped' } 'tray Stop action'
     if (-not $Daemon.WaitForExit(10000)) { throw 'Stop menu action left worker running' }
     if ($Tray.HasExited -or -not [WeTypeNativeSmoke]::HasTrayIcon($Controller)) { throw 'Stopping synchronization removed the tray entry' }
+    Toggle-WpfDirection 'SendSwitch'
+    $null = Wait-Value {
+        $Saved = Get-Content (Join-Path $TestState 'config.json') -Raw | ConvertFrom-Json
+        $Saved.send_enabled -eq $false -and (Read-WpfView).controls.SendSwitch.enabled
+    } 'direction saved while stopped'
+    if ((Inspect-Worker).phase -ne 'stopped') { throw 'Changing direction unexpectedly started synchronization' }
+    Toggle-WpfDirection 'SendSwitch'
+    $null = Wait-Value {
+        $Saved = Get-Content (Join-Path $TestState 'config.json') -Raw | ConvertFrom-Json
+        $Saved.send_enabled -eq $true -and (Read-WpfView).controls.SendSwitch.enabled
+    } 'stopped direction restored'
+    $ConfigHash = (Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash
     Invoke-WpfAction 'StartButton'
     $Restarted = Wait-Worker
     if ($Restarted.pid -eq $Daemon.Id) { throw 'Start menu did not start a fresh worker' }
@@ -460,7 +511,7 @@ try {
     }
     if ((Get-FileHash (Join-Path $TestState 'identity.json') -Algorithm SHA256).Hash -ne $IdentityHash) { throw 'Uninstall removed/replaced the retained identity' }
     if ((Get-FileHash (Join-Path $TestState 'config.json') -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Uninstall removed/changed the retained configuration' }
-    Write-Output 'Tray/WPF verification passed: icon resources, 0.4.1 upgrade, configuration redaction, live system theme changes, UI Automation commands, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
+    Write-Output 'Tray/WPF verification passed: icon resources, 0.4.1 upgrade, configuration redaction, live system theme changes, UI Automation commands and four direction modes, settings persistence, singleton, stop/start/restart, resident reinstall, quit and uninstall.'
 } finally {
     Write-Host '[tray check] Cleaning up isolated test processes and restoring environment.'
     # Only processes created or identified within this isolated installation

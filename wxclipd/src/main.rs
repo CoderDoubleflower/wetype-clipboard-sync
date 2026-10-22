@@ -31,7 +31,7 @@ wxclipd - Windows 微信输入法跨设备剪贴板
   unbind [--peer UIN]  解绑一台已关联设备
   status            显示剪贴板同步状态
   inspect           显示本地运行状态 JSON（不访问网络）
-  run               启动剪贴板双向同步（前台运行，Ctrl-C 退出）
+  run               按已保存的方向设置同步剪贴板（前台运行，Ctrl-C 退出）
   start             Windows 后台运行，日志写入状态目录
   stop              停止当前用户的后台同步
   sync-now          通知正在运行的 wxclipd 立即同步一次
@@ -155,6 +155,10 @@ async fn dispatch(args: Args) -> Result<()> {
         println!(
             "远端轮询：{} 秒；粘贴触发：{}",
             args.settings.poll_interval_seconds, args.settings.paste_trigger
+        );
+        println!(
+            "发送到其他设备：{}；接收其他设备：{}",
+            args.settings.send_enabled, args.settings.receive_enabled
         );
         return Ok(());
     }
@@ -290,6 +294,8 @@ async fn dispatch(args: Args) -> Result<()> {
                     paste_trigger,
                     paste_debounce,
                     send_current,
+                    send_enabled: args.settings.send_enabled,
+                    receive_enabled: args.settings.receive_enabled,
                 },
                 ipc::endpoint(&args.state)?,
                 listener,
@@ -1250,6 +1256,8 @@ mod tests {
             proxy: Some(proxy_url),
             poll_interval_seconds: 17,
             paste_trigger: false,
+            send_enabled: false,
+            receive_enabled: true,
         };
         let runtime_status = runtime_status::RuntimeStatus::new(
             &settings,
@@ -1283,6 +1291,8 @@ mod tests {
                 serde_json::from_str(reply.strip_prefix("ok ").unwrap()).unwrap();
             assert_eq!(value["poll_interval_seconds"], 17);
             assert_eq!(value["paste_trigger"], false);
+            assert_eq!(value["send_enabled"], false);
+            assert_eq!(value["receive_enabled"], true);
             assert_eq!(value["local_poll_interval_ms"], 700);
             assert!(value["last_success_at"].is_null());
             if value["phase"] == "retrying" {

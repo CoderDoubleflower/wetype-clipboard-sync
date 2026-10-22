@@ -19,6 +19,8 @@ public partial class MainWindow : Window
         _themes = themes;
         InitializeComponent();
         DataContext = view;
+        _view.DirectionRequested += ForwardDirection;
+        Closed += (_, _) => _view.DirectionRequested -= ForwardDirection;
         _themes.Changed += UpdateThemeLabel;
         UpdateThemeLabel();
         SizeChanged += (_, _) => UpdateResponsiveLayout();
@@ -69,6 +71,8 @@ public partial class MainWindow : Window
             CommandRequested?.Invoke(action);
         }
     }
+
+    private void ForwardDirection(string command) => CommandRequested?.Invoke(command);
 
     private void Hide_Click(object sender, RoutedEventArgs e) => Hide();
 
